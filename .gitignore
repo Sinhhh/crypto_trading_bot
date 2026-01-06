@@ -1,7 +1,18 @@
 # Virtual environments
 venv/
 **/venv/
+.venv/
+**/.venv/
+
+# Local secrets
+.env
+.env.*
 
 # Python caches
 __pycache__/
 *.pyc
+
+# Generated outputs
+reports/*.csv
+logs/
+.pytest_cache/

@@ -1,17 +1,19 @@
-"""Backwards-compatible entrypoint.
+"""Spot backtest runner.
 
-Runs the spot backtest runner implemented in the src package.
+This module is importable (for reuse) and runnable via a thin wrapper at repo root
+([bot.py](bot.py)).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
-from data.loader import load_ohlcv
-from src.crypto_trading.unified.unified_signal import unified_signal_with_meta
-from src.crypto_trading.lifecycle.spot_lifecycle import SpotTradeState, SpotTradeLifecycle
-
-from src.crypto_trading.indicators.momentum import rsi, adx
+from crypto_trading.io.loader import load_ohlcv
+from crypto_trading.unified.unified_signal import unified_signal_with_meta
+from crypto_trading.lifecycle.spot_lifecycle import SpotTradeState, SpotTradeLifecycle
+from crypto_trading.indicators.momentum import rsi, adx
 
 
 def run_spot_backtest(
@@ -235,9 +237,42 @@ def run_spot_backtest(
     print(f"Total PnL: {total_pnl:.2f} USDT")    
 
 
-if __name__ == "__main__":
+def main() -> None:
     symbol = "BTCUSDT"
     timeframe = "1H"
-    ohlcv_file = f"data/{symbol}_{timeframe}.csv"
 
-    run_spot_backtest(symbol, timeframe, ohlcv_file, starting_balance=100.0)
+    data_dir = Path("data")
+    preferred = [
+        data_dir / f"{symbol}_1H.csv",
+        data_dir / f"{symbol}_1h.csv",
+        data_dir / f"{symbol}_4H.csv",
+        data_dir / f"{symbol}_4h.csv",
+        data_dir / f"{symbol}_15M.csv",
+        data_dir / f"{symbol}_15m.csv",
+    ]
+    ohlcv_path = next((p for p in preferred if p.exists()), None)
+    if ohlcv_path is None:
+        candidates = sorted(data_dir.glob(f"{symbol}_*.csv")) if data_dir.exists() else []
+        ohlcv_path = candidates[0] if candidates else None
+
+    if ohlcv_path is None:
+        expected = data_dir / f"{symbol}_{timeframe}.csv"
+        print(f"OHLCV CSV not found: {expected}")
+        print(
+            "Fetch candles first, e.g.:\n"
+            "  python3 scripts/mexc_fetch_ohlcv.py --timeframe 1h --symbols BTCUSDT\n"
+            "or point the code to an existing CSV under data/."
+        )
+        return
+
+    # Derive timeframe label from filename for nicer printing.
+    stem = ohlcv_path.stem
+    if stem.startswith(f"{symbol}_"):
+        timeframe = stem[len(f"{symbol}_") :]
+
+    run_spot_backtest(symbol, timeframe, str(ohlcv_path), starting_balance=100.0)
+
+
+if __name__ == "__main__":
+    main()
+
