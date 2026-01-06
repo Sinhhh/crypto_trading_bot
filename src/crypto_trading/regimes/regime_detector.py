@@ -69,6 +69,7 @@ def detect_regime(df: pd.DataFrame) -> str:
     df["ema_50"] = ema(df["close"], 50)
     df["sma_200"] = sma(df["close"], 200)
     df["ema_slope"] = df["ema_50"].diff(5)  # EMA slope over last 5 bars
+    # df["ema_slope_pct"] = df["ema_50"].pct_change(5)
     df["adx"] = adx(df, 14)
     df["bb_width"] = bollinger_width(df, 20)
 
@@ -76,12 +77,19 @@ def detect_regime(df: pd.DataFrame) -> str:
 
     # --- TREND Detection ---
     if latest["adx"] > 25:
+        # if latest["ema_slope_pct"] > 0 and latest["ema_50"] > latest["sma_200"]:
         if latest["ema_slope"] > 0 and latest["ema_50"] > latest["sma_200"]:
             return "TREND_UP"
+        # elif latest["ema_slope_pct"] < 0 and latest["ema_50"] < latest["sma_200"]:
         elif latest["ema_slope"] < 0 and latest["ema_50"] < latest["sma_200"]:
             return "TREND_DOWN"
 
     # --- RANGE Detection ---
+    # bb_quantile = df["bb_width"].rolling(100, min_periods=20).quantile(0.2)
+    # q = bb_quantile.iloc[-1]
+    # if (not pd.isna(q)) and latest["adx"] < 20 and latest["bb_width"] < float(q):
+    #    return "RANGE
+
     bb_quantile = df["bb_width"].rolling(100, min_periods=20).quantile(0.2)
     if latest["adx"] < 20 and latest["bb_width"] < bb_quantile.iloc[-1]:
         return "RANGE"
