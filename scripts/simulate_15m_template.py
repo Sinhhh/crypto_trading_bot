@@ -25,7 +25,7 @@ from typing import Literal
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from crypto_trading.io.loader import load_ohlcv
 from crypto_trading.regimes.regime_detector import detect_regime

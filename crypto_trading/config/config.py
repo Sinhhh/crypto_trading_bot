@@ -18,4 +18,3 @@ def get_api_key() -> str:
 
 def get_secret_key() -> str:
     return str(os.getenv("MEXC_SECRET_KEY", ""))
-

@@ -45,7 +45,9 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
         axis=1,
     ).max(axis=1)
 
-    plus_di = 100 * (plus_dm.rolling(int(period)).mean() / tr.rolling(int(period)).mean())
+    plus_di = 100 * (
+        plus_dm.rolling(int(period)).mean() / tr.rolling(int(period)).mean()
+    )
     minus_di = 100 * (
         minus_dm.rolling(int(period)).mean() / tr.rolling(int(period)).mean()
     )

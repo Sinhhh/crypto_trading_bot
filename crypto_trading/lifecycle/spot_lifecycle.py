@@ -11,11 +11,11 @@ class SpotTradeState:
     entry_price: float | None = None
     entry_index: int | None = None
     highest_price: float | None = None
-    atr_stop: float | None = None         # ATR-based stop
-    partial_target: float | None = None   # Take partial profit price
-    cooldown_until: int | None = None     # Bar index when next entry allowed
+    atr_stop: float | None = None  # ATR-based stop
+    partial_target: float | None = None  # Take partial profit price
+    cooldown_until: int | None = None  # Bar index when next entry allowed
     entry_regime: str | None = None
-    qty: float | None = None              # base-asset quantity for spot sizing
+    qty: float | None = None  # base-asset quantity for spot sizing
     entry_notional_usdt: float | None = None
     realized_pnl_usdt: float = 0.0
     partial_taken: bool = False
@@ -27,11 +27,11 @@ class SpotTradeLifecycle:
     def __init__(
         self,
         *,
-        atr_multiplier: float = 3.0,          # ATR * multiplier for stop
-        trail_pct: float | None = 0.02,       # trailing stop (% from high)
+        atr_multiplier: float = 3.0,  # ATR * multiplier for stop
+        trail_pct: float | None = 0.02,  # trailing stop (% from high)
         trail_atr_mult: float | None = None,  # optional ATR trailing (Chandelier)
-        partial_profit_pct: float = 0.03,     # take 1st portion at +3%
-        partial_sell_fraction: float = 0.5,   # fraction of qty to sell at partial
+        partial_profit_pct: float = 0.03,  # take 1st portion at +3%
+        partial_sell_fraction: float = 0.5,  # fraction of qty to sell at partial
         max_bars_in_trade: int = 48,
         cooldown_bars: int = 3,
         exit_on_regime_change: bool = True,
@@ -51,7 +51,16 @@ class SpotTradeLifecycle:
 
     def compute_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """Compute ATR of last 'period' bars using project indicator."""
-        if df is None or len(df) < int(period) + 2:
+        col = f"atr_{int(period)}"
+        if df is None or len(df) < 1:
+            return 0.0
+
+        if col in df.columns:
+            v = df[col].iloc[-1]
+            if not pd.isna(v):
+                return float(v)
+
+        if len(df) < int(period) + 2:
             return 0.0
         if not {"high", "low", "close"}.issubset(df.columns):
             return 0.0
@@ -61,7 +70,9 @@ class SpotTradeLifecycle:
             return 0.0
         return float(a)
 
-    def _should_exit_on_regime_change(self, entry_regime: str | None, regime: str) -> bool:
+    def _should_exit_on_regime_change(
+        self, entry_regime: str | None, regime: str
+    ) -> bool:
         """Return True if current regime invalidates holding a long position."""
         cur = str(regime)
         ent = None if entry_regime is None else str(entry_regime)
@@ -96,6 +107,7 @@ class SpotTradeLifecycle:
         regime: str,
         price: float,
         bar_index: int,
+        atr_stop_override: float | None = None,
     ) -> tuple[SpotTradeState, dict | None]:
         """Spot lifecycle with ATR stop, trailing stop, partial profit, and cooldown.
 
@@ -118,8 +130,11 @@ class SpotTradeLifecycle:
         # -----------------------
         if not state.in_position and signal == "BUY":
             # ATR-based stop
-            a = self.compute_atr(df_1h)
-            atr_stop = price - self.atr_multiplier * a if a > 0 else price * 0.97
+            if atr_stop_override is not None:
+                atr_stop = float(atr_stop_override)
+            else:
+                a = self.compute_atr(df_1h)
+                atr_stop = price - self.atr_multiplier * a if a > 0 else price * 0.97
             partial_target = price * (1.0 + self.partial_profit_pct)
 
             if df_1h is not None and len(df_1h) > 0 and "high" in df_1h.columns:
@@ -148,6 +163,7 @@ class SpotTradeLifecycle:
                 "bar_index": int(bar_index),
                 "entry_index": int(bar_index),
                 "entry_price": float(price),
+                "atr_stop": float(atr_stop),
                 "regime": str(regime),
                 "partial_taken": False,
                 "pnl_usdt": 0.0,
@@ -210,8 +226,14 @@ class SpotTradeLifecycle:
             if self.trail_atr_mult is not None:
                 a = self.compute_atr(df_1h)
                 if a > 0:
-                    trail_atr_price = float(highest) - float(self.trail_atr_mult) * float(a)
-                    trail_price = trail_atr_price if trail_price is None else max(float(trail_price), float(trail_atr_price))
+                    trail_atr_price = float(highest) - float(
+                        self.trail_atr_mult
+                    ) * float(a)
+                    trail_price = (
+                        trail_atr_price
+                        if trail_price is None
+                        else max(float(trail_price), float(trail_atr_price))
+                    )
 
             if trail_price is not None and last_low <= float(trail_price):
                 exit_price = float(trail_price)
@@ -257,13 +279,19 @@ class SpotTradeLifecycle:
                     frac = max(0.0, min(1.0, float(self.partial_sell_fraction)))
                     qty_sold = float(qty) * float(frac)
                     qty_sold = min(float(qty_sold), float(qty))
-                    pnl_partial_usdt = float(qty_sold) * (exec_price - float(state.entry_price))
+                    pnl_partial_usdt = float(qty_sold) * (
+                        exec_price - float(state.entry_price)
+                    )
                     state.qty = float(qty) - float(qty_sold)
-                    state.realized_pnl_usdt = float(state.realized_pnl_usdt) + float(pnl_partial_usdt)
+                    state.realized_pnl_usdt = float(state.realized_pnl_usdt) + float(
+                        pnl_partial_usdt
+                    )
 
                 # Mark partial taken and bump stop to at least break-even.
                 if state.entry_price is not None:
-                    state.atr_stop = max(float(state.atr_stop or 0.0), float(state.entry_price))
+                    state.atr_stop = max(
+                        float(state.atr_stop or 0.0), float(state.entry_price)
+                    )
                 state.partial_taken = True
 
                 trade_event = {
@@ -290,7 +318,9 @@ class SpotTradeLifecycle:
                     if entry_price is not None and qty is not None:
                         pnl_exit_usdt = float(qty) * (exit_price - float(entry_price))
 
-                    pnl_total_usdt = float(state.realized_pnl_usdt) + float(pnl_exit_usdt)
+                    pnl_total_usdt = float(state.realized_pnl_usdt) + float(
+                        pnl_exit_usdt
+                    )
                     trade_event = {
                         "type": "EXIT",
                         "price": exit_price,
@@ -351,7 +381,9 @@ class SpotTradeLifecycle:
                     if entry_price is not None and qty is not None:
                         pnl_exit_usdt = float(qty) * (exit_price - float(entry_price))
 
-                    pnl_total_usdt = float(state.realized_pnl_usdt) + float(pnl_exit_usdt)
+                    pnl_total_usdt = float(state.realized_pnl_usdt) + float(
+                        pnl_exit_usdt
+                    )
                     trade_event = {
                         "type": "EXIT",
                         "price": exit_price,

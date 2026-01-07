@@ -60,7 +60,10 @@ def ema_sma_cross_signal(
     prev = df.iloc[-2]
     last = df.iloc[-1]
 
-    if pd.isna(prev[["ema_fast", "sma_slow"]]).any() or pd.isna(last[["ema_fast", "sma_slow"]]).any():
+    if (
+        pd.isna(prev[["ema_fast", "sma_slow"]]).any()
+        or pd.isna(last[["ema_fast", "sma_slow"]]).any()
+    ):
         return "HOLD"
 
     ema_prev = float(prev["ema_fast"])

@@ -9,6 +9,7 @@ Classifies market conditions into:
 Uses ADX, moving-average slope, and Bollinger Band width, with an additional
 EMA(12)/SMA(26) crossover fallback.
 """
+
 import pandas as pd
 
 from crypto_trading.indicators.momentum import adx
@@ -35,7 +36,12 @@ def _ema_sma_cross_regime(
     prev_slow = float(sma_slow.iloc[-2])
     last_fast = float(ema_fast.iloc[-1])
     last_slow = float(sma_slow.iloc[-1])
-    if pd.isna(prev_fast) or pd.isna(prev_slow) or pd.isna(last_fast) or pd.isna(last_slow):
+    if (
+        pd.isna(prev_fast)
+        or pd.isna(prev_slow)
+        or pd.isna(last_fast)
+        or pd.isna(last_slow)
+    ):
         return None
 
     crossed_up = prev_fast <= prev_slow and last_fast > last_slow

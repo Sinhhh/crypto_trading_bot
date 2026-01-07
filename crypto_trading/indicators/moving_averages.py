@@ -34,4 +34,6 @@ def wma(series: pd.Series, period: int) -> pd.Series:
         weights = np.arange(1, n + 1, dtype=float)
         return float(np.dot(x, weights) / weights.sum())
 
-    return series.rolling(window=int(period), min_periods=1).apply(weighted_avg, raw=True)
+    return series.rolling(window=int(period), min_periods=1).apply(
+        weighted_avg, raw=True
+    )
