@@ -1,26 +1,16 @@
 from __future__ import annotations
 
+from datetime import timezone
 from typing import Literal, Optional
-
-import os
-import sys
-from pathlib import Path
 
 import pandas as pd
 
-if __package__ is None:  # pragma: no cover
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from crypto_trading.io.loader import load_ohlcv
-from crypto_trading.lifecycle.spot_lifecycle import SpotTradeState, SpotTradeLifecycle
-from crypto_trading.unified.unified_signal import (
-    unified_signal_with_meta,
-    unified_signal_mtf,
-)
-
-from crypto_trading.indicators.volatility import atr
-from crypto_trading.indicators.momentum import rsi, adx
+from crypto_trading.indicators.momentum import adx, rsi
 from crypto_trading.indicators.moving_averages import ema
+from crypto_trading.indicators.volatility import atr
+from crypto_trading.io.loader import load_ohlcv
+from crypto_trading.lifecycle.spot_lifecycle import SpotTradeLifecycle, SpotTradeState
+from crypto_trading.unified.unified_signal import unified_signal_mtf, unified_signal_with_meta
 
 
 def run_spot_backtest(
@@ -40,10 +30,8 @@ def run_spot_backtest(
     fee_rate: float = 0.0,  # ✅ MEXC spot 0.000%
     slippage_rate: float = 0.0001,  # ignored if theoretical_max=True
     # --- bot selection ---
-    entry_tf: Literal["15m", "1h", "4h"] | None = None,
-    context_files: (
-        dict[str, str] | None
-    ) = None,  # {"1h": "...csv", "4h": "...csv"} for 15m bot
+    entry_tf: Literal["5m", "15m", "1h", "4h"] | None = None,
+    context_files: dict[str, str] | None = None,  # {"1h": "...csv", "4h": "...csv"} for 15m bot
 ):
     """
     Spot backtest runner (proper spot simulation).
@@ -68,6 +56,11 @@ def run_spot_backtest(
     # Load entry timeframe data
     # -------------------------
     df_entry = load_ohlcv(ohlcv_file).copy()
+    if len(df_entry) == 0:
+        raise ValueError(
+            f"No candles loaded from entry OHLCV file: {ohlcv_file}. "
+            "File may be empty (header-only) or datetime parsing failed."
+        )
     if max_candles is not None and max_candles > 0 and len(df_entry) > int(max_candles):
         df_entry = df_entry.tail(int(max_candles))
 
@@ -93,11 +86,10 @@ def run_spot_backtest(
         slippage_rate = 0.0
 
     mode_str = "THEORETICAL_MAX" if theoretical_max else "REALISTIC"
-    if print_rows:
-        print(f"Loaded {len(df_entry)} candles for {symbol} {timeframe}.")
-        print(
-            f"Mode: {mode_str} | fee_rate={fee_rate:.6f} | slippage_rate={slippage_rate:.6f} | entry_tf={entry_tf}"
-        )
+    print(f"Loaded {len(df_entry)} candles for {symbol} {timeframe}.")
+    print(
+        f"Mode: {mode_str} | fee_rate={fee_rate:.6f} | slippage_rate={slippage_rate:.6f} | entry_tf={entry_tf}"
+    )
 
     # -------------------------
     # Load context data if 15m bot
@@ -108,9 +100,7 @@ def run_spot_backtest(
 
     if context_files:
         # For entry_tf='15m', 1h/4h context is REQUIRED for unified_signal_mtf.
-        if entry_tf == "15m" and (
-            ("1h" not in context_files) or ("4h" not in context_files)
-        ):
+        if entry_tf == "15m" and (("1h" not in context_files) or ("4h" not in context_files)):
             raise ValueError(
                 "For entry_tf='15m', you must provide context_files={'1h': <csv>, '4h': <csv>} "
                 "containing CLOSED 1H and 4H candles."
@@ -124,14 +114,28 @@ def run_spot_backtest(
         if "1d" in context_files:
             df_1d = load_ohlcv(context_files["1d"]).copy()
 
+        if df_1h is not None and len(df_1h) == 0:
+            raise ValueError(
+                f"No candles loaded from 1h context OHLCV file: {context_files['1h']}. "
+                "File may be empty (header-only) or datetime parsing failed."
+            )
+        if df_4h is not None and len(df_4h) == 0:
+            raise ValueError(
+                f"No candles loaded from 4h context OHLCV file: {context_files['4h']}. "
+                "File may be empty (header-only) or datetime parsing failed."
+            )
+        if df_1d is not None and len(df_1d) == 0:
+            raise ValueError(
+                f"No candles loaded from 1d context OHLCV file: {context_files['1d']}. "
+                "File may be empty (header-only) or datetime parsing failed."
+            )
+
         for name, dfx in [("1h", df_1h), ("4h", df_4h), ("1d", df_1d)]:
             if dfx is None:
                 continue
             missing_ctx = needed - set(dfx.columns)
             if missing_ctx:
-                raise ValueError(
-                    f"OHLCV missing columns in {name} context data: {missing_ctx}"
-                )
+                raise ValueError(f"OHLCV missing columns in {name} context data: {missing_ctx}")
 
     # -------------------------
     # Lifecycle
@@ -169,8 +173,14 @@ def run_spot_backtest(
     VOLUME_MULTIPLIER = 1.2
     SMA_LEN = 50  # timeframe-dependent; override with gate_kwargs if needed
 
+    # Optional day-trading rules (UTC-day boundary)
+    DAYTRADE_UTC_FLAT: bool = False
+    NO_ENTRY_LAST_BARS: int | None = None
+
     # Optional win-rate focused filters (opt-in via gate_kwargs)
     ALLOWED_REGIMES: set[str] | None = None
+    ALLOWED_ENTRY_REGIMES: dict[str, bool] | None = None
+    ALLOW_MEAN_REVERSION_IN_RANGE: bool = True
     MIN_ADX_FOR_BUY: float | None = None
     MIN_ATR_RATIO_FOR_BUY: float | None = None
     HTF_TREND_FOR_BUY: bool = False
@@ -178,18 +188,22 @@ def run_spot_backtest(
     HTF_EMA_LEN: int = 200
     MIN_HTF_BARS: int = 50
 
+    # Optional: only allow CROSS_UP/DOWN trades if confirmed by HTF or strong volume.
+    CROSS_REQUIRE_HTF_OR_VOLUME: bool = False
+    CROSS_VOLUME_MULTIPLIER: float = 1.5
+    CROSS_VOLUME_SMA_LEN: int = 20
+
     if gate_kwargs:
-        SAFE_ML_THRESHOLD = float(
-            gate_kwargs.get("SAFE_ML_THRESHOLD", SAFE_ML_THRESHOLD)
-        )
-        GROWTH_ML_THRESHOLD = float(
-            gate_kwargs.get("GROWTH_ML_THRESHOLD", GROWTH_ML_THRESHOLD)
-        )
+        SAFE_ML_THRESHOLD = float(gate_kwargs.get("SAFE_ML_THRESHOLD", SAFE_ML_THRESHOLD))
+        GROWTH_ML_THRESHOLD = float(gate_kwargs.get("GROWTH_ML_THRESHOLD", GROWTH_ML_THRESHOLD))
         PERSONALITY_MODE = str(gate_kwargs.get("PERSONALITY_MODE", PERSONALITY_MODE))
-        VOLUME_MULTIPLIER = float(
-            gate_kwargs.get("VOLUME_MULTIPLIER", VOLUME_MULTIPLIER)
-        )
+        VOLUME_MULTIPLIER = float(gate_kwargs.get("VOLUME_MULTIPLIER", VOLUME_MULTIPLIER))
         SMA_LEN = int(gate_kwargs.get("SMA_LEN", SMA_LEN))
+
+        DAYTRADE_UTC_FLAT = bool(gate_kwargs.get("DAYTRADE_UTC_FLAT", DAYTRADE_UTC_FLAT))
+        no_entry = gate_kwargs.get("NO_ENTRY_LAST_BARS", None)
+        if no_entry is not None:
+            NO_ENTRY_LAST_BARS = int(no_entry)
 
         allowed = gate_kwargs.get("ALLOWED_REGIMES", None)
         if allowed is not None:
@@ -198,9 +212,31 @@ def run_spot_backtest(
                 allowed_list = [x.strip() for x in allowed.split(",") if x.strip()]
             else:
                 allowed_list = list(allowed)
-            ALLOWED_REGIMES = {
-                str(x).strip().upper() for x in allowed_list if str(x).strip()
-            }
+            ALLOWED_REGIMES = {str(x).strip().upper() for x in allowed_list if str(x).strip()}
+
+        aer = gate_kwargs.get("ALLOWED_ENTRY_REGIMES", None)
+        if aer is not None:
+            if isinstance(aer, dict):
+                ALLOWED_ENTRY_REGIMES = {str(k).strip().upper(): bool(v) for k, v in aer.items()}
+            else:
+                # Accept strings like: "TREND_UP=1,RANGE=0,CROSS_UP=0,TRANSITION=0"
+                s = str(aer)
+                tbl: dict[str, bool] = {}
+                for part in s.split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if "=" not in part:
+                        continue
+                    k, v = part.split("=", 1)
+                    kk = str(k).strip().upper()
+                    vv = str(v).strip().lower()
+                    tbl[kk] = vv in {"1", "true", "yes", "y", "on"}
+                ALLOWED_ENTRY_REGIMES = tbl if tbl else None
+
+        ALLOW_MEAN_REVERSION_IN_RANGE = bool(
+            gate_kwargs.get("ALLOW_MEAN_REVERSION_IN_RANGE", ALLOW_MEAN_REVERSION_IN_RANGE)
+        )
 
         min_adx = gate_kwargs.get("MIN_ADX_FOR_BUY", None)
         if min_adx is not None:
@@ -214,6 +250,53 @@ def run_spot_backtest(
         HTF_TF = gate_kwargs.get("HTF_TF", HTF_TF)
         HTF_EMA_LEN = int(gate_kwargs.get("HTF_EMA_LEN", HTF_EMA_LEN))
         MIN_HTF_BARS = int(gate_kwargs.get("MIN_HTF_BARS", MIN_HTF_BARS))
+
+        CROSS_REQUIRE_HTF_OR_VOLUME = bool(
+            gate_kwargs.get("CROSS_REQUIRE_HTF_OR_VOLUME", CROSS_REQUIRE_HTF_OR_VOLUME)
+        )
+        CROSS_VOLUME_MULTIPLIER = float(gate_kwargs.get("CROSS_VOLUME_MULTIPLIER", CROSS_VOLUME_MULTIPLIER))
+        CROSS_VOLUME_SMA_LEN = int(gate_kwargs.get("CROSS_VOLUME_SMA_LEN", CROSS_VOLUME_SMA_LEN))
+
+    # Optional ML gate model (probability of TP-before-SL within 24H).
+    ml_gate = None
+    ml_model_path = None
+    if gate_kwargs:
+        ml_model_path = gate_kwargs.get("ML_MODEL_PATH", None)
+    if ml_model_path:
+        try:
+            from crypto_trading.ml.gate_model import load_gate_model
+
+            ml_gate = load_gate_model(str(ml_model_path))
+            print(f"ML gate enabled: model={ml_model_path}")
+        except Exception as e:
+            ml_gate = None
+            print(
+                f"[WARN] Failed to load ML model ({ml_model_path}): {e}. Falling back to heuristic confidence."
+            )
+
+    # Optional volatility (should-trade) model gate.
+    vol_gate = None
+    vol_model_path = None
+    vol_threshold: float | None = None
+    if gate_kwargs:
+        vol_model_path = gate_kwargs.get("VOL_MODEL_PATH", None)
+        vol_threshold = gate_kwargs.get("VOL_THRESHOLD", None)
+        if vol_threshold is not None:
+            try:
+                vol_threshold = float(vol_threshold)
+            except Exception:
+                vol_threshold = None
+    if vol_model_path:
+        try:
+            from crypto_trading.ml.volatility_model import load_volatility_model
+
+            vol_gate = load_volatility_model(str(vol_model_path))
+            if vol_threshold is None:
+                vol_threshold = 0.5
+            print(f"Volatility gate enabled: model={vol_model_path} threshold={float(vol_threshold):.2f}")
+        except Exception as e:
+            vol_gate = None
+            print(f"[WARN] Failed to load volatility model ({vol_model_path}): {e}. Disabling volatility gate.")
 
     # Precompute HTF EMA if we will use HTF trend gating.
     htf_df: Optional[pd.DataFrame] = None
@@ -236,11 +319,6 @@ def run_spot_backtest(
                 htf_df[htf_ema_col] = ema(htf_df["close"].astype(float), int(HTF_EMA_LEN))
 
     mode = PERSONALITY_MODE.upper()
-
-    # Precompute common indicator series once.
-    # This reduces per-bar rolling/indicator costs even when lookback_bars is used.
-    # (It also reflects the usual "use all history up to now" behavior.)
-    use_precomputed = True
 
     # detect_regime needs >=200 bars on the timeframe it runs on.
     # For 1h/4h bots, this is okay. For 15m bot, regime comes from df_4h/df_1h inside unified_signal_mtf.
@@ -343,16 +421,180 @@ def run_spot_backtest(
         except Exception:
             return 0.0
 
+    def _to_utc_ts(ts) -> pd.Timestamp | None:
+        try:
+            t = pd.Timestamp(ts)
+            if t.tzinfo is None:
+                return t.tz_localize(timezone.utc)
+            return t.tz_convert(timezone.utc)
+        except Exception:
+            return None
+
+    def _bar_minutes_for(tf: str) -> int:
+        tf = str(tf).lower().replace("min", "m")
+        if tf in {"5m", "5"}:
+            return 5
+        if tf in {"15m", "15"}:
+            return 15
+        if tf in {"1h", "60"}:
+            return 60
+        if tf in {"4h", "240"}:
+            return 240
+        return 60
+
+    def _bars_to_utc_midnight(exec_ts, *, bar_minutes: int) -> float:
+        t = _to_utc_ts(exec_ts)
+        if t is None:
+            return float("nan")
+        next_midnight = t.normalize() + pd.Timedelta(days=1)
+        delta_min = (next_midnight - t).total_seconds() / 60.0
+        return float(delta_min / float(max(1, int(bar_minutes))))
+
+    def _is_last_bar_of_utc_day(exec_ts, *, bar_minutes: int) -> bool:
+        t = _to_utc_ts(exec_ts)
+        if t is None:
+            return False
+        next_midnight = t.normalize() + pd.Timedelta(days=1)
+        return (t + pd.Timedelta(minutes=int(bar_minutes))) >= next_midnight
+
+    def ml_confidence(
+        df_in: pd.DataFrame,
+        *,
+        regime: str,
+        source: str,
+        exec_ts,
+        bar_minutes: int,
+    ) -> float:
+        """Model-based confidence (TP-before-SL probability) with safe fallback."""
+        if ml_gate is None:
+            return estimate_confidence(df_in, source=source)
+
+        if df_in is None or len(df_in) < 30:
+            return 0.0
+
+        try:
+            last = df_in.iloc[-1]
+            close_v = float(last["close"])
+            vol_v = float(last["volume"])
+
+            ret_1 = float(df_in["close"].pct_change(1).iloc[-1])
+            ret_3 = float(df_in["close"].pct_change(3).iloc[-1]) if len(df_in) >= 4 else float("nan")
+            ret_6 = float(df_in["close"].pct_change(6).iloc[-1]) if len(df_in) >= 7 else float("nan")
+            rv_20 = float(df_in["close"].pct_change().rolling(20).std().iloc[-1])
+
+            sma_gate_v = float(last.get("_sma_gate", float("nan")))
+            vol_sma_v = float(last.get("_vol_sma20", float("nan")))
+            rsi_v = float(last.get("_rsi14", float("nan")))
+            adx_v = float(last.get("_adx14", float("nan")))
+
+            dist_sma = (
+                (close_v / sma_gate_v - 1.0)
+                if (sma_gate_v and not pd.isna(sma_gate_v))
+                else float("nan")
+            )
+            vol_ratio = (vol_v / vol_sma_v) if (vol_sma_v and not pd.isna(vol_sma_v)) else float("nan")
+
+            ts_utc = _to_utc_ts(exec_ts)
+            minute_of_day = (
+                (int(ts_utc.hour) * 60 + int(ts_utc.minute)) if ts_utc is not None else None
+            )
+            bar_of_day = (
+                float(int(minute_of_day) // max(1, int(bar_minutes)))
+                if minute_of_day is not None
+                else float("nan")
+            )
+            day_of_week = float(int(ts_utc.dayofweek)) if ts_utc is not None else float("nan")
+            bars_to_midnight = _bars_to_utc_midnight(exec_ts, bar_minutes=int(bar_minutes))
+
+            features = {
+                "symbol": str(symbol),
+                "bar_of_day": bar_of_day,
+                "day_of_week": day_of_week,
+                "bars_to_utc_midnight": bars_to_midnight,
+                "close": close_v,
+                "volume": vol_v,
+                "ret_1": ret_1,
+                "ret_3": ret_3,
+                "ret_6": ret_6,
+                "rv_20": rv_20,
+                "rsi14": rsi_v,
+                "adx14": adx_v,
+                "dist_sma": dist_sma,
+                "vol_ratio": vol_ratio,
+                "regime": str(regime),
+                "source": str(source),
+            }
+            return float(ml_gate.predict_proba_row(features))
+        except Exception:
+            return estimate_confidence(df_in, source=source)
+
     def threshold_for() -> float:
         return float(SAFE_ML_THRESHOLD if mode == "SAFE" else GROWTH_ML_THRESHOLD)
+
+    def vol_confidence(
+        df_in: pd.DataFrame,
+        *,
+        regime: str,
+        source: str,
+        exec_ts,
+        bar_minutes: int,
+    ) -> float | None:
+        """Volatility probability (big move within horizon) if vol_gate is enabled."""
+        if vol_gate is None:
+            return None
+        if df_in is None or len(df_in) < 30:
+            return 0.0
+        try:
+            last = df_in.iloc[-1]
+            close_v = float(last["close"])
+            vol_v = float(last["volume"])
+
+            ret_1 = float(df_in["close"].pct_change(1).iloc[-1])
+            ret_3 = float(df_in["close"].pct_change(3).iloc[-1]) if len(df_in) >= 4 else float("nan")
+            ret_6 = float(df_in["close"].pct_change(6).iloc[-1]) if len(df_in) >= 7 else float("nan")
+            rv_20 = float(df_in["close"].pct_change().rolling(20).std().iloc[-1])
+
+            sma_gate_v = float(last.get("_sma_gate", float("nan")))
+            vol_sma_v = float(last.get("_vol_sma20", float("nan")))
+            rsi_v = float(last.get("_rsi14", float("nan")))
+            adx_v = float(last.get("_adx14", float("nan")))
+
+            dist_sma = (close_v / sma_gate_v - 1.0) if (sma_gate_v and not pd.isna(sma_gate_v)) else float("nan")
+            vol_ratio = (vol_v / vol_sma_v) if (vol_sma_v and not pd.isna(vol_sma_v)) else float("nan")
+
+            ts_utc = _to_utc_ts(exec_ts)
+            minute_of_day = (int(ts_utc.hour) * 60 + int(ts_utc.minute)) if ts_utc is not None else None
+            bar_of_day = float(int(minute_of_day) // max(1, int(bar_minutes))) if minute_of_day is not None else float("nan")
+            day_of_week = float(int(ts_utc.dayofweek)) if ts_utc is not None else float("nan")
+            bars_to_midnight = _bars_to_utc_midnight(exec_ts, bar_minutes=int(bar_minutes))
+
+            features = {
+                "symbol": str(symbol),
+                "bar_of_day": bar_of_day,
+                "day_of_week": day_of_week,
+                "bars_to_utc_midnight": bars_to_midnight,
+                "close": close_v,
+                "volume": vol_v,
+                "ret_1": ret_1,
+                "ret_3": ret_3,
+                "ret_6": ret_6,
+                "rv_20": rv_20,
+                "rsi14": rsi_v,
+                "adx14": adx_v,
+                "dist_sma": dist_sma,
+                "vol_ratio": vol_ratio,
+                "regime": str(regime),
+                "source": str(source),
+            }
+            return float(vol_gate.predict_proba_row(features))
+        except Exception:
+            return 0.0
 
     # -------------------------
     # Main loop
     # -------------------------
     for idx in range(min_bars_required, len(df_entry), step):
-        assert_invariants(
-            cash=cash_usdt, asset=asset_qty, context=f"start bar idx={idx}"
-        )
+        assert_invariants(cash=cash_usdt, asset=asset_qty, context=f"start bar idx={idx}")
 
         # Compute signals on bars up to idx-1 (no lookahead)
         if lookback_bars is not None and lookback_bars > 0:
@@ -366,6 +608,8 @@ def run_spot_backtest(
         # current bar is idx (execution/management bar)
         open_i = float(open_arr[idx])
         close_i = float(close_arr[idx])
+        exec_ts = idx_values[idx]
+        bar_minutes = _bar_minutes_for(entry_tf)
 
         # Trend filter on entry timeframe (configurable length)
         sma_val = float(sma_gate_arr[idx - 1])
@@ -379,23 +623,66 @@ def run_spot_backtest(
             df_1h_sig = df_1h.loc[:now_ts]
             df_4h_sig = df_4h.loc[:now_ts]
 
-            signal, regime, source = unified_signal_mtf(
-                df_sig_entry, df_1h_sig, df_4h_sig
-            )
+            signal, regime, source = unified_signal_mtf(df_sig_entry, df_1h_sig, df_4h_sig)
         elif entry_tf == "1h":
-            signal, regime, source = unified_signal_with_meta(df_sig_entry)
+            # If 4h context is available, use it as HTF confirmation for CROSS trades.
+            df_htf_sig = None
+            if df_4h is not None:
+                try:
+                    now_ts = df_sig_entry.index[-1]
+                    df_htf_sig = df_4h.loc[:now_ts]
+                except Exception:
+                    df_htf_sig = None
+
+            signal, regime, source = unified_signal_with_meta(
+                df_sig_entry,
+                df_htf=df_htf_sig,
+                cross_require_htf_or_volume=CROSS_REQUIRE_HTF_OR_VOLUME,
+                cross_volume_multiplier=CROSS_VOLUME_MULTIPLIER,
+                cross_volume_sma_len=CROSS_VOLUME_SMA_LEN,
+            )
         elif entry_tf == "4h":
-            signal, regime, source = unified_signal_with_meta(df_sig_entry)
+            signal, regime, source = unified_signal_with_meta(
+                df_sig_entry,
+                df_htf=None,
+                cross_require_htf_or_volume=CROSS_REQUIRE_HTF_OR_VOLUME,
+                cross_volume_multiplier=CROSS_VOLUME_MULTIPLIER,
+                cross_volume_sma_len=CROSS_VOLUME_SMA_LEN,
+            )
         else:
             raise ValueError(f"Unsupported entry_tf={entry_tf}")
 
+        # Day-trading hard flat: force exit on the last bar of the UTC day.
+        if DAYTRADE_UTC_FLAT and state.in_position and _is_last_bar_of_utc_day(exec_ts, bar_minutes=bar_minutes):
+            signal = "SELL"
+
         # Gate BUY entries only
         if signal == "BUY":
-            # Optional regime filter (often increases win rate by skipping chop)
-            if (
-                ALLOWED_REGIMES is not None
-                and str(regime).upper() not in ALLOWED_REGIMES
-            ):
+            regime_u = str(regime).strip().upper()
+            source_u = str(source).strip().lower()
+
+            # Volatility gate (should-trade): require a predicted big move soon.
+            if vol_gate is not None and vol_threshold is not None:
+                vprob = vol_confidence(
+                    df_sig_entry,
+                    regime=regime,
+                    source=source,
+                    exec_ts=exec_ts,
+                    bar_minutes=bar_minutes,
+                )
+                if vprob is None or float(vprob) < float(vol_threshold):
+                    signal = "HOLD"
+
+            # Optional explicit permission table (preferred when set)
+            if ALLOWED_ENTRY_REGIMES is not None:
+                if regime_u == "RANGE" and bool(ALLOW_MEAN_REVERSION_IN_RANGE) and source_u == "mean_reversion":
+                    pass
+                else:
+                    if not bool(ALLOWED_ENTRY_REGIMES.get(regime_u, False)):
+                        signal = "HOLD"
+
+            # Legacy regime allowlist (kept for backwards compatibility)
+            elif ALLOWED_REGIMES is not None and regime_u not in ALLOWED_REGIMES:
                 signal = "HOLD"
 
         if signal == "BUY":
@@ -436,9 +723,7 @@ def run_spot_backtest(
 
         if signal == "BUY":
             # SMA gate
-            if pd.isna(sma_val) or float(df_sig_entry["close"].iloc[-1]) < float(
-                sma_val
-            ):
+            if pd.isna(sma_val) or float(df_sig_entry["close"].iloc[-1]) < float(sma_val):
                 signal = "HOLD"
             else:
                 # Optional ADX gate (trend strength)
@@ -459,20 +744,28 @@ def run_spot_backtest(
                 avg_vol = vol_sma20_arr[idx - 1]
                 latest_vol = vol_arr[idx - 1]
                 if not (pd.isna(avg_vol) or pd.isna(latest_vol)):
-                    vol_ok = float(latest_vol) > float(avg_vol) * float(
-                        VOLUME_MULTIPLIER
-                    )
+                    vol_ok = float(latest_vol) > float(avg_vol) * float(VOLUME_MULTIPLIER)
                 if vol_ok is None:
-                    vol_ok = volume_confirmation(
-                        df_sig_entry, multiplier=VOLUME_MULTIPLIER
-                    )
+                    vol_ok = volume_confirmation(df_sig_entry, multiplier=VOLUME_MULTIPLIER)
 
                 if not bool(vol_ok):
                     signal = "HOLD"
                 else:
-                    conf = estimate_confidence(df_sig_entry, source=source)
-                    if conf < threshold_for():
-                        signal = "HOLD"
+                    # Day-trading entry cut-off: no new entries in last N bars of UTC day.
+                    if NO_ENTRY_LAST_BARS is not None:
+                        btm = _bars_to_utc_midnight(exec_ts, bar_minutes=bar_minutes)
+                        if (not pd.isna(btm)) and float(btm) <= float(NO_ENTRY_LAST_BARS):
+                            signal = "HOLD"
+                    if signal == "BUY":
+                        conf = ml_confidence(
+                            df_sig_entry,
+                            regime=regime,
+                            source=source,
+                            exec_ts=exec_ts,
+                            bar_minutes=bar_minutes,
+                        )
+                        if conf < threshold_for():
+                            signal = "HOLD"
 
         # Optional: dynamic ATR stop computed from CLOSED candles only.
         # This aligns sizing with the actual lifecycle stop and avoids lookahead.
@@ -480,9 +773,7 @@ def run_spot_backtest(
         if signal == "BUY" and (not state.in_position):
             try:
                 atr_val = float(df_sig_entry["atr_14"].iloc[-1])
-                recent_vol = (
-                    df_sig_entry["close"].pct_change().rolling(20).std().iloc[-1]
-                )
+                recent_vol = df_sig_entry["close"].pct_change().rolling(20).std().iloc[-1]
                 if pd.isna(recent_vol):
                     atr_mult = float(lifecycle.atr_multiplier)
                 elif float(recent_vol) < 0.005:
@@ -518,37 +809,31 @@ def run_spot_backtest(
             etype = str(trade_event.get("type", ""))
 
             if etype == "ENTRY":
-                entry_price = apply_buy_fill(
-                    float(trade_event.get("entry_price", open_i))
-                )
+                entry_price = apply_buy_fill(float(trade_event.get("entry_price", open_i)))
 
                 # Use lifecycle's atr_stop (now deterministic via atr_stop_override).
                 stop_price = trade_event.get("atr_stop", None)
                 if stop_price is None:
                     stop_price = getattr(state, "atr_stop", None)
                 stop_price = float(stop_price) if stop_price is not None else None
-                stop_dist = (
-                    max(entry_price - float(stop_price), 1e-6)
-                    if stop_price is not None
-                    else 0.0
-                )
+                stop_dist = max(entry_price - float(stop_price), 1e-6) if stop_price is not None else 0.0
 
                 # Confidence-scaled position sizing
-                conf = estimate_confidence(df_sig_entry, source=source)
+                conf = ml_confidence(
+                    df_sig_entry,
+                    regime=regime,
+                    source=source,
+                    exec_ts=exec_ts,
+                    bar_minutes=bar_minutes,
+                )
                 qty_multiplier = 0.5 + conf * 2.0  # 0.5x–2.5x scaling
                 target_notional = min(float(POSITION_USDT), float(cash_usdt))
-                target_notional = min(
-                    float(cash_usdt), target_notional * float(qty_multiplier)
-                )
+                target_notional = min(float(cash_usdt), target_notional * float(qty_multiplier))
                 target_qty = target_notional / entry_price
 
                 # Risk-based adjustment using ATR stop
                 risk_usdt = float(cash_usdt) * float(MAX_RISK_PER_TRADE)
-                risk_qty = (
-                    (risk_usdt / stop_dist)
-                    if (stop_dist and stop_dist > 0)
-                    else target_qty
-                )
+                risk_qty = (risk_usdt / stop_dist) if (stop_dist and stop_dist > 0) else target_qty
 
                 qty = max(0.0, min(float(target_qty), float(risk_qty)))
 
@@ -579,11 +864,7 @@ def run_spot_backtest(
                         state.qty = qty
                         state.entry_notional_usdt = cost
 
-                        assert_invariants(
-                            cash=cash_usdt,
-                            asset=asset_qty,
-                            context=f"after BUY idx={idx}",
-                        )
+                        assert_invariants(cash=cash_usdt, asset=asset_qty, context=f"after BUY idx={idx}")
                         assert_desync(
                             in_position=state.in_position,
                             asset=asset_qty,
@@ -606,11 +887,7 @@ def run_spot_backtest(
                     cash_usdt += proceeds - fee(proceeds)
                     asset_qty -= qty_sold
 
-                    assert_invariants(
-                        cash=cash_usdt,
-                        asset=asset_qty,
-                        context=f"after PARTIAL idx={idx}",
-                    )
+                    assert_invariants(cash=cash_usdt, asset=asset_qty, context=f"after PARTIAL idx={idx}")
                     assert_desync(
                         in_position=state.in_position,
                         asset=asset_qty,
@@ -634,9 +911,7 @@ def run_spot_backtest(
                     cash_usdt += proceeds - fee(proceeds)
                     asset_qty -= qty_to_sell
 
-                    assert_invariants(
-                        cash=cash_usdt, asset=asset_qty, context=f"after EXIT idx={idx}"
-                    )
+                    assert_invariants(cash=cash_usdt, asset=asset_qty, context=f"after EXIT idx={idx}")
                     assert_desync(
                         in_position=state.in_position,
                         asset=asset_qty,
@@ -693,80 +968,16 @@ def run_spot_backtest(
     losses = sum(1 for t in closed_trades if t["pnl_total_usdt"] < 0)
     win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
     total_pnl = sum(float(t["pnl_total_usdt"]) for t in closed_trades)
-    final_equity = (
-        equity_curve[-1]["equity"] if equity_curve else float(starting_balance)
-    )
+    final_equity = equity_curve[-1]["equity"] if equity_curve else float(starting_balance)
+    net_pnl = float(final_equity) - float(starting_balance)
 
     print(f"\nBacktest completed: {symbol}")
     print(f"Closed trades: {total_trades}")
     print(f"Wins: {wins} Losses: {losses} Win rate: {win_rate:.2f}%")
+    if ml_gate is not None:
+        print(f"Gate: ML ({ml_model_path})")
+    else:
+        print("Gate: heuristic (no ML_MODEL_PATH)")
+    print(f"Net PnL (equity-start): {net_pnl:.2f} USDT")
     print(f"Total (lifecycle) trade PnL sum: {total_pnl:.2f} USDT")
     print(f"Final equity (cash + asset MTM): {final_equity:.2f} USDT")
-
-
-def main() -> None:
-    # Allow piping output without crashing (e.g. `... | head`).
-    try:  # pragma: no cover
-        import signal
-
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except Exception:
-        pass
-
-    symbol = "ETHUSDT"
-
-    data_dir = Path("data/raw")
-    preferred = [
-        data_dir / f"{symbol}_15M.csv",
-        data_dir / f"{symbol}_1H.csv",
-        data_dir / f"{symbol}_4H.csv",
-    ]
-    ohlcv_path = next((p for p in preferred if p.exists()), None)
-    if ohlcv_path is None:
-        candidates = (
-            sorted(data_dir.glob(f"{symbol}_*.csv")) if data_dir.exists() else []
-        )
-        ohlcv_path = candidates[0] if candidates else None
-
-    if ohlcv_path is None:
-        print(f"OHLCV CSV not found under: {data_dir}")
-        return
-
-    stem = ohlcv_path.stem
-    timeframe = (
-        stem[len(f"{symbol}_") :] if stem.startswith(f"{symbol}_") else "UNKNOWN"
-    )
-
-    entry_tf: Literal["15m", "1h", "4h"]
-    tf_lower = timeframe.lower()
-    if "15" in tf_lower:
-        entry_tf = "15m"
-    elif "4h" in tf_lower or "240" in tf_lower:
-        entry_tf = "4h"
-    else:
-        entry_tf = "1h"
-
-    context_files = None
-    if entry_tf == "15m":
-        ctx_1h = data_dir / f"{symbol}_1H.csv"
-        ctx_4h = data_dir / f"{symbol}_4H.csv"
-        if ctx_1h.exists() and ctx_4h.exists():
-            context_files = {"1h": str(ctx_1h), "4h": str(ctx_4h)}
-        else:
-            # Fallback: run the single-timeframe bot on 15m data
-            entry_tf = "1h"
-
-    run_spot_backtest(
-        symbol=symbol,
-        timeframe=timeframe,
-        ohlcv_file=str(ohlcv_path),
-        max_candles=25000,
-        starting_balance=100.0,
-        entry_tf=entry_tf,
-        context_files=context_files,
-        print_rows=True,
-    )
-
-
-if __name__ == "__main__":
-    main()

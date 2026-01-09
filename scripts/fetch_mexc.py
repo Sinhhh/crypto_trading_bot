@@ -1,15 +1,11 @@
-"""
-Fetch historical OHLCV from MEXC for one or more symbols and a chosen timeframe.
+"""Fetch historical OHLCV from MEXC.
 
-Examples:
-  python3 scripts/mexc_fetch_ohlcv.py --timeframe 15m
-  python3 scripts/mexc_fetch_ohlcv.py --timeframe 1h --symbols BTCUSDT,ETHUSDT --start-date 2025-01-01T00:00:00Z
+Module entrypoint:
+  python3 -m scripts.fetch_mexc --timeframe 1h --symbols BTCUSDT,ETHUSDT
 
-Outputs (default out-dir: data/):
-  data/raw/BTCUSDT_15M.csv
-  data/raw/ETHUSDT_15M.csv
-
-CSV columns: datetime, open, high, low, close, volume
+Outputs (default out-dir: data/raw/):
+  data/raw/BTCUSDT_1H.csv
+  data/raw/ETHUSDT_1H.csv
 """
 
 from __future__ import annotations
@@ -23,8 +19,12 @@ from pathlib import Path
 import ccxt
 import pandas as pd
 
+# Support running as a plain script: `python3 scripts/fetch_mexc.py ...`
+# (Recommended usage remains: `python3 -m scripts.fetch_mexc ...`)
 if __package__ is None:  # pragma: no cover
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
 from crypto_trading.utils.timeframes import timeframe_to_suffix
 
@@ -56,10 +56,12 @@ def fetch_all_ohlcv(
     save_path: str,
     limit: int = 1000,
 ) -> pd.DataFrame:
-    exchange = ccxt.mexc({
-        "timeout": 30000,
-        "enableRateLimit": True,
-    })
+    exchange = ccxt.mexc(
+        {
+            "timeout": 30000,
+            "enableRateLimit": True,
+        }
+    )
 
     symbol_ccxt = _normalize_symbol(symbol)
     tf = str(timeframe).strip().lower()
@@ -85,11 +87,22 @@ def fetch_all_ohlcv(
         if since >= now_ts:
             break
 
-    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df = pd.DataFrame(
+        all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
+    )
+    if df.empty:
+        raise RuntimeError(
+            f"No OHLCV candles returned for {symbol_ccxt} {tf} since {start_date}. "
+            "Refusing to write an empty (header-only) CSV."
+        )
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
     df = df[["datetime", "open", "high", "low", "close", "volume"]]
-    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
-    df = df.drop_duplicates(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+    df[["open", "high", "low", "close", "volume"]] = df[
+        ["open", "high", "low", "close", "volume"]
+    ].astype(float)
+    df = df.drop_duplicates(subset=["datetime"]).sort_values("datetime").reset_index(
+        drop=True
+    )
 
     out_path = Path(save_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,18 +116,25 @@ def fetch_all_symbols(
     symbols: list[str],
     timeframe: str,
     start_date: str,
-    out_dir: str = "data",
+    out_dir: str = "data/raw",
 ) -> None:
     for sym in symbols:
         symbol_ccxt = _normalize_symbol(sym)
         name = _symbol_to_filename(symbol_ccxt)
         tf_suffix = _timeframe_to_suffix(timeframe)
         save_path = str(Path(out_dir) / f"{name}_{tf_suffix}.csv")
-        fetch_all_ohlcv(symbol=symbol_ccxt, timeframe=timeframe, start_date=start_date, save_path=save_path)
+        fetch_all_ohlcv(
+            symbol=symbol_ccxt,
+            timeframe=timeframe,
+            start_date=start_date,
+            save_path=save_path,
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch MEXC historical OHLCV for symbols/timeframe")
+    parser = argparse.ArgumentParser(
+        description="Fetch MEXC historical OHLCV for symbols/timeframe"
+    )
     parser.add_argument("--timeframe", default="1h", help="Timeframe, e.g. 15m, 1h, 4h")
     parser.add_argument(
         "--symbols",

@@ -10,9 +10,12 @@ venv/
 
 # Python caches
 __pycache__/
+**/__pycache__/
 *.pyc
 
 # Generated outputs
 reports/*.csv
 logs/
 .pytest_cache/
+
+.vscode/

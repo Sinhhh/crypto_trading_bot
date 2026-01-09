@@ -11,7 +11,14 @@ from typing import Literal
 import ccxt
 import pandas as pd
 
-from crypto_trading.config.config import get_api_key, get_secret_key
+from crypto_trading.config.config import (
+    get_api_key,
+    get_secret_key,
+    load_execution_config_from_env,
+    load_gate_config_from_env,
+    parse_allowed_entry_regimes,
+    parse_allowed_regimes,
+)
 from crypto_trading.indicators.momentum import adx, rsi
 from crypto_trading.indicators.volatility import atr
 from crypto_trading.indicators.moving_averages import ema
@@ -84,16 +91,34 @@ class PaperConfig:
 
     # optional win-rate focused filters (opt-in)
     allowed_regimes: tuple[str, ...] | None = None
+    allowed_entry_regimes: dict[str, bool] | None = None
+    allow_mean_reversion_in_range: bool = True
     min_adx_for_buy: float | None = None
     min_atr_ratio_for_buy: float | None = None
     htf_trend_for_buy: bool = False
     htf_ema_len: int = 200
     min_htf_bars: int = 50
 
+    # Optional ML gate model (joblib path). If set, replaces heuristic confidence.
+    ml_model_path: str | None = None
+
+    # Optional volatility (should-trade) model (joblib path).
+    vol_model_path: str | None = None
+    vol_threshold: float | None = None
+
+    # Optional day-trading rules (UTC-day boundary)
+    daytrade_utc_flat: bool = False
+    no_entry_last_bars: int | None = None
+
+    # Optional: only allow CROSS_UP/DOWN trades if confirmed by HTF or strong volume.
+    cross_require_htf_or_volume: bool = False
+    cross_volume_multiplier: float = 1.5
+    cross_volume_sma_len: int = 20
+
 
 class PaperTrader:
     def __init__(
-        self, *, symbol: str, entry_tf: Literal["15m", "1h", "4h"], cfg: PaperConfig
+        self, *, symbol: str, entry_tf: Literal["5m", "15m", "1h", "4h"], cfg: PaperConfig
     ):
         self.symbol = str(symbol)
         self.entry_tf = entry_tf
@@ -121,6 +146,59 @@ class PaperTrader:
 
         self._eps_qty = 1e-12
         self._eps_usdt = 1e-9
+
+        self._ml_gate = None
+        if cfg.ml_model_path:
+            try:
+                from crypto_trading.ml.gate_model import load_gate_model
+
+                self._ml_gate = load_gate_model(str(cfg.ml_model_path))
+            except Exception:
+                self._ml_gate = None
+
+        self._vol_gate = None
+        if cfg.vol_model_path:
+            try:
+                from crypto_trading.ml.volatility_model import load_volatility_model
+
+                self._vol_gate = load_volatility_model(str(cfg.vol_model_path))
+            except Exception:
+                self._vol_gate = None
+
+    def _bar_minutes(self) -> int:
+        tf = str(self.entry_tf).lower().replace("min", "m")
+        if tf == "5m":
+            return 5
+        if tf == "15m":
+            return 15
+        if tf == "4h":
+            return 240
+        return 60
+
+    def _bars_to_utc_midnight(self, ts) -> float:
+        try:
+            t = pd.Timestamp(ts)
+            if t.tzinfo is None:
+                t = t.tz_localize(timezone.utc)
+            else:
+                t = t.tz_convert(timezone.utc)
+            next_midnight = t.normalize() + pd.Timedelta(days=1)
+            delta_min = (next_midnight - t).total_seconds() / 60.0
+            return float(delta_min / float(max(1, self._bar_minutes())))
+        except Exception:
+            return float("nan")
+
+    def _is_last_bar_of_utc_day(self, ts) -> bool:
+        try:
+            t = pd.Timestamp(ts)
+            if t.tzinfo is None:
+                t = t.tz_localize(timezone.utc)
+            else:
+                t = t.tz_convert(timezone.utc)
+            next_midnight = t.normalize() + pd.Timedelta(days=1)
+            return (t + pd.Timedelta(minutes=int(self._bar_minutes()))) >= next_midnight
+        except Exception:
+            return False
 
     def _fee(self, amount_usdt: float) -> float:
         return float(amount_usdt) * float(self.cfg.fee_rate)
@@ -178,6 +256,145 @@ class PaperTrader:
             if pd.isna(a_val):
                 return 0.0
             return max(0.0, min(1.0, a_val / 50.0))
+        except Exception:
+            return 0.0
+
+    def _ml_confidence(self, df: pd.DataFrame, *, regime: str, source: str, exec_ts=None) -> float:
+        if self._ml_gate is None:
+            return self._estimate_confidence(df, source=source)
+
+        if df is None or len(df) < 30:
+            return 0.0
+
+        try:
+            last = df.iloc[-1]
+            close_v = float(last["close"])
+            vol_v = float(last["volume"])
+
+            ret_1 = float(df["close"].pct_change(1).iloc[-1])
+            ret_3 = float(df["close"].pct_change(3).iloc[-1]) if len(df) >= 4 else float("nan")
+            ret_6 = float(df["close"].pct_change(6).iloc[-1]) if len(df) >= 7 else float("nan")
+            rv_20 = float(df["close"].pct_change().rolling(20).std().iloc[-1])
+
+            sma_gate_v = float(last.get("_sma_gate", float("nan")))
+            vol_sma_v = float(last.get("_vol_sma20", float("nan")))
+            rsi_v = float(last.get("_rsi14", float("nan")))
+            adx_v = float(last.get("_adx14", float("nan")))
+
+            dist_sma = (close_v / sma_gate_v - 1.0) if (sma_gate_v and not pd.isna(sma_gate_v)) else float("nan")
+            vol_ratio = (vol_v / vol_sma_v) if (vol_sma_v and not pd.isna(vol_sma_v)) else float("nan")
+
+            # Intraday time features (UTC)
+            ts = exec_ts
+            if ts is None and len(df) > 0:
+                ts = df.index[-1]
+            try:
+                t = pd.Timestamp(ts) if ts is not None else None
+                if t is None:
+                    ts_utc = None
+                elif t.tzinfo is None:
+                    ts_utc = t.tz_localize(timezone.utc)
+                else:
+                    ts_utc = t.tz_convert(timezone.utc)
+            except Exception:
+                ts_utc = None
+
+            minute_of_day = (
+                (int(ts_utc.hour) * 60 + int(ts_utc.minute)) if ts_utc is not None else None
+            )
+            bar_of_day = (
+                float(int(minute_of_day) // max(1, self._bar_minutes()))
+                if minute_of_day is not None
+                else float("nan")
+            )
+            day_of_week = float(int(ts_utc.dayofweek)) if ts_utc is not None else float("nan")
+            bars_to_midnight = self._bars_to_utc_midnight(ts) if ts is not None else float("nan")
+
+            features = {
+                "symbol": str(self.symbol),
+                "bar_of_day": bar_of_day,
+                "day_of_week": day_of_week,
+                "bars_to_utc_midnight": bars_to_midnight,
+                "close": close_v,
+                "volume": vol_v,
+                "ret_1": ret_1,
+                "ret_3": ret_3,
+                "ret_6": ret_6,
+                "rv_20": rv_20,
+                "rsi14": rsi_v,
+                "adx14": adx_v,
+                "dist_sma": dist_sma,
+                "vol_ratio": vol_ratio,
+                "regime": str(regime),
+                "source": str(source),
+            }
+            return float(self._ml_gate.predict_proba_row(features))
+        except Exception:
+            return self._estimate_confidence(df, source=source)
+
+    def _vol_confidence(self, df: pd.DataFrame, *, regime: str, source: str, exec_ts=None) -> float | None:
+        if self._vol_gate is None:
+            return None
+        if df is None or len(df) < 30:
+            return 0.0
+
+        try:
+            last = df.iloc[-1]
+            close_v = float(last["close"])
+            vol_v = float(last["volume"])
+
+            ret_1 = float(df["close"].pct_change(1).iloc[-1])
+            ret_3 = float(df["close"].pct_change(3).iloc[-1]) if len(df) >= 4 else float("nan")
+            ret_6 = float(df["close"].pct_change(6).iloc[-1]) if len(df) >= 7 else float("nan")
+            rv_20 = float(df["close"].pct_change().rolling(20).std().iloc[-1])
+
+            sma_gate_v = float(last.get("_sma_gate", float("nan")))
+            vol_sma_v = float(last.get("_vol_sma20", float("nan")))
+            rsi_v = float(last.get("_rsi14", float("nan")))
+            adx_v = float(last.get("_adx14", float("nan")))
+
+            dist_sma = (close_v / sma_gate_v - 1.0) if (sma_gate_v and not pd.isna(sma_gate_v)) else float("nan")
+            vol_ratio = (vol_v / vol_sma_v) if (vol_sma_v and not pd.isna(vol_sma_v)) else float("nan")
+
+            ts = exec_ts
+            if ts is None and len(df) > 0:
+                ts = df.index[-1]
+
+            try:
+                t = pd.Timestamp(ts) if ts is not None else None
+                if t is None:
+                    ts_utc = None
+                elif t.tzinfo is None:
+                    ts_utc = t.tz_localize(timezone.utc)
+                else:
+                    ts_utc = t.tz_convert(timezone.utc)
+            except Exception:
+                ts_utc = None
+
+            minute_of_day = (int(ts_utc.hour) * 60 + int(ts_utc.minute)) if ts_utc is not None else None
+            bar_of_day = float(int(minute_of_day) // max(1, self._bar_minutes())) if minute_of_day is not None else float("nan")
+            day_of_week = float(int(ts_utc.dayofweek)) if ts_utc is not None else float("nan")
+            bars_to_midnight = self._bars_to_utc_midnight(ts) if ts is not None else float("nan")
+
+            features = {
+                "symbol": str(self.symbol),
+                "bar_of_day": bar_of_day,
+                "day_of_week": day_of_week,
+                "bars_to_utc_midnight": bars_to_midnight,
+                "close": close_v,
+                "volume": vol_v,
+                "ret_1": ret_1,
+                "ret_3": ret_3,
+                "ret_6": ret_6,
+                "rv_20": rv_20,
+                "rsi14": rsi_v,
+                "adx14": adx_v,
+                "dist_sma": dist_sma,
+                "vol_ratio": vol_ratio,
+                "regime": str(regime),
+                "source": str(source),
+            }
+            return float(self._vol_gate.predict_proba_row(features))
         except Exception:
             return 0.0
 
@@ -248,16 +465,60 @@ class PaperTrader:
                     signal, regime, source = unified_signal_mtf(
                         df_sig, df_1h_sig, df_4h_sig
                     )
-            elif self.entry_tf in {"1h", "4h"}:
-                signal, regime, source = unified_signal_with_meta(df_sig)
+            elif self.entry_tf in {"5m", "1h", "4h"}:
+                # If we have 4h context (fetched for 15m bot), we can use it as HTF confirmation.
+                df_htf_sig = None
+                if df_4h is not None:
+                    try:
+                        now_ts = df_sig.index[-1]
+                        df_htf_sig = df_4h.loc[:now_ts]
+                    except Exception:
+                        df_htf_sig = None
+
+                signal, regime, source = unified_signal_with_meta(
+                    df_sig,
+                    df_htf=df_htf_sig,
+                    cross_require_htf_or_volume=bool(self.cfg.cross_require_htf_or_volume),
+                    cross_volume_multiplier=float(self.cfg.cross_volume_multiplier),
+                    cross_volume_sma_len=int(self.cfg.cross_volume_sma_len),
+                )
             else:
                 raise ValueError(f"Unsupported entry_tf={self.entry_tf}")
 
+            # Day-trading force-flat (UTC day): exit on the last bar of the UTC day.
+            if bool(self.cfg.daytrade_utc_flat) and self.state.in_position:
+                exec_ts = df_entry.index[-1]
+                if self._is_last_bar_of_utc_day(exec_ts):
+                    signal = "SELL"
+
             # Optional regime filter
-            if signal == "BUY" and self.cfg.allowed_regimes is not None:
-                allowed = {str(x).strip().upper() for x in self.cfg.allowed_regimes}
-                if str(regime).strip().upper() not in allowed:
-                    signal = "HOLD"
+            if signal == "BUY":
+                regime_u = str(regime).strip().upper()
+                source_u = str(source).strip().lower()
+
+                # Volatility gate (should-trade): require a predicted big move soon.
+                if self.cfg.vol_threshold is not None:
+                    vprob = self._vol_confidence(df_sig, regime=regime, source=source, exec_ts=df_entry.index[-1])
+                    if vprob is None or float(vprob) < float(self.cfg.vol_threshold):
+                        signal = "HOLD"
+
+                # Optional explicit permission table (preferred when set)
+                if self.cfg.allowed_entry_regimes is not None:
+                    if (
+                        regime_u == "RANGE"
+                        and bool(self.cfg.allow_mean_reversion_in_range)
+                        and source_u == "mean_reversion"
+                    ):
+                        pass
+                    else:
+                        if not bool(self.cfg.allowed_entry_regimes.get(regime_u, False)):
+                            signal = "HOLD"
+
+                # Legacy allowlist
+                elif self.cfg.allowed_regimes is not None:
+                    allowed = {str(x).strip().upper() for x in self.cfg.allowed_regimes}
+                    if regime_u not in allowed:
+                        signal = "HOLD"
 
             # Optional HTF trend filter (15m bot only: uses 4h context already fetched)
             if signal == "BUY" and bool(self.cfg.htf_trend_for_buy):
@@ -304,9 +565,22 @@ class PaperTrader:
                 elif not self._volume_ok(df_sig):
                     signal = "HOLD"
                 else:
-                    conf = self._estimate_confidence(df_sig, source=source)
-                    if conf < self._threshold():
-                        signal = "HOLD"
+                    # Day-trading entry cut-off: no new entries in last N bars of UTC day.
+                    if self.cfg.no_entry_last_bars is not None:
+                        exec_ts = df_entry.index[-1]
+                        btm = self._bars_to_utc_midnight(exec_ts)
+                        if (not pd.isna(btm)) and float(btm) <= float(self.cfg.no_entry_last_bars):
+                            signal = "HOLD"
+
+                    if signal == "BUY":
+                        conf = self._ml_confidence(
+                            df_sig,
+                            regime=regime,
+                            source=source,
+                            exec_ts=df_entry.index[-1],
+                        )
+                        if conf < self._threshold():
+                            signal = "HOLD"
 
             self.last_regime = str(regime)
             self.last_source = str(source)
@@ -368,7 +642,12 @@ class PaperTrader:
 
             target_notional = min(float(self.cfg.position_usdt), float(self.cash_usdt))
             conf = (
-                self._estimate_confidence(df_entry.iloc[:-1], source=self.last_source)
+                self._ml_confidence(
+                    df_entry.iloc[:-1],
+                    regime=self.last_regime,
+                    source=self.last_source,
+                    exec_ts=event_time,
+                )
                 if len(df_entry) > 1
                 else 0.0
             )
@@ -614,17 +893,61 @@ def main() -> None:
     p.add_argument("--position-usdt", type=float, default=25.0)
     p.add_argument("--max-risk", type=float, default=0.03)
 
-    p.add_argument("--fee-rate", type=float, default=0.0)
-    p.add_argument("--slippage-rate", type=float, default=0.0001)
-    p.add_argument("--theoretical-max", action="store_true")
+    p.add_argument(
+        "--fee-rate",
+        type=float,
+        default=None,
+        help="Override env FEE_RATE (default uses env/config)",
+    )
+    p.add_argument(
+        "--slippage-rate",
+        type=float,
+        default=None,
+        help="Override env SLIPPAGE_RATE (default uses env/config)",
+    )
+    p.add_argument(
+        "--theoretical-max",
+        action="store_true",
+        default=None,
+        help="Override env THEORETICAL_MAX (if enabled: fee/slippage forced to 0)",
+    )
 
     p.add_argument("--print-rows", action="store_true", help="Print BUY/SELL rows")
+
+    p.add_argument(
+        "--ml-model-path",
+        default=None,
+        help="Optional joblib model path for ML gating (TP-before-SL probability)",
+    )
+
+    p.add_argument(
+        "--vol-model-path",
+        default=None,
+        help="Optional joblib model path for volatility gating (should-trade probability)",
+    )
+    p.add_argument(
+        "--vol-threshold",
+        type=float,
+        default=None,
+        help="If --vol-model-path (or VOL_MODEL_PATH) is set: require vol_prob >= this threshold",
+    )
 
     # Optional trade filters
     p.add_argument(
         "--allowed-regimes",
         default=None,
         help="Comma-separated regimes allowed for BUY (e.g. TREND_UP,CROSS_UP)",
+    )
+    p.add_argument(
+        "--allowed-entry-regimes",
+        default=None,
+        help="Explicit regime permission table for BUY like: TREND_UP=1,RANGE=0,CROSS_UP=0,TRANSITION=0",
+    )
+    p.add_argument(
+        "--allow-mean-reversion-in-range",
+        action="store_true",
+        default=None,
+        help="If using --allowed-entry-regimes, still allow BUY when source=mean_reversion in RANGE",
     )
     p.add_argument(
         "--min-adx-for-buy",
@@ -641,13 +964,33 @@ def main() -> None:
     p.add_argument(
         "--htf-trend-for-buy",
         action="store_true",
+        default=None,
         help="15m bot only: require 4h close above 4h EMA",
     )
     p.add_argument(
         "--htf-ema-len",
         type=int,
-        default=200,
-        help="EMA length for HTF trend filter (default 200)",
+        default=None,
+        help="EMA length for HTF trend filter (default uses env/config)",
+    )
+
+    p.add_argument(
+        "--cross-require-htf-or-volume",
+        action="store_true",
+        default=None,
+        help="Only allow CROSS_UP/DOWN trades if confirmed by HTF regime or extra-strong volume",
+    )
+    p.add_argument(
+        "--cross-volume-multiplier",
+        type=float,
+        default=None,
+        help="If CROSS confirmation uses volume: require vol > SMA(vol)*multiplier (default uses env/config)",
+    )
+    p.add_argument(
+        "--cross-volume-sma-len",
+        type=int,
+        default=None,
+        help="SMA length for CROSS volume confirmation (default uses env/config)",
     )
 
     args = p.parse_args()
@@ -665,26 +1008,101 @@ def main() -> None:
         else:
             entry_tf = "1h"
 
+    exec_cfg = load_execution_config_from_env()
+    gate_cfg = load_gate_config_from_env()
+
+    fee_rate = float(args.fee_rate) if args.fee_rate is not None else float(exec_cfg.fee_rate)
+    slippage_rate = (
+        float(args.slippage_rate)
+        if args.slippage_rate is not None
+        else float(exec_cfg.slippage_rate)
+    )
+    theoretical_max = (
+        bool(args.theoretical_max)
+        if args.theoretical_max is not None
+        else bool(exec_cfg.theoretical_max)
+    )
+
+    allowed_regimes = (
+        parse_allowed_regimes(args.allowed_regimes)
+        if args.allowed_regimes
+        else parse_allowed_regimes(gate_cfg.allowed_regimes)
+    )
+    allowed_entry_regimes = (
+        parse_allowed_entry_regimes(args.allowed_entry_regimes)
+        if args.allowed_entry_regimes
+        else parse_allowed_entry_regimes(gate_cfg.allowed_entry_regimes)
+    )
+    allow_mean_reversion_in_range = (
+        bool(args.allow_mean_reversion_in_range)
+        if args.allow_mean_reversion_in_range is not None
+        else bool(gate_cfg.allow_mean_reversion_in_range)
+    )
+
+    min_adx_for_buy = (
+        float(args.min_adx_for_buy)
+        if args.min_adx_for_buy is not None
+        else gate_cfg.min_adx_for_buy
+    )
+    min_atr_ratio_for_buy = (
+        float(args.min_atr_ratio_for_buy)
+        if args.min_atr_ratio_for_buy is not None
+        else gate_cfg.min_atr_ratio_for_buy
+    )
+
+    htf_trend_for_buy = (
+        bool(args.htf_trend_for_buy)
+        if args.htf_trend_for_buy is not None
+        else bool(gate_cfg.htf_trend_for_buy)
+    )
+    htf_ema_len = int(args.htf_ema_len) if args.htf_ema_len is not None else int(gate_cfg.htf_ema_len)
+
+    cross_require_htf_or_volume = (
+        bool(args.cross_require_htf_or_volume)
+        if args.cross_require_htf_or_volume is not None
+        else bool(gate_cfg.cross_require_htf_or_volume)
+    )
+    cross_volume_multiplier = (
+        float(args.cross_volume_multiplier)
+        if args.cross_volume_multiplier is not None
+        else float(gate_cfg.cross_volume_multiplier)
+    )
+    cross_volume_sma_len = (
+        int(args.cross_volume_sma_len)
+        if args.cross_volume_sma_len is not None
+        else int(gate_cfg.cross_volume_sma_len)
+    )
+
+    ml_model_path = str(args.ml_model_path) if args.ml_model_path else gate_cfg.ml_model_path
+    vol_model_path = str(args.vol_model_path) if args.vol_model_path else gate_cfg.vol_model_path
+    vol_threshold = float(args.vol_threshold) if args.vol_threshold is not None else gate_cfg.vol_threshold
+
     cfg = PaperConfig(
         starting_balance=float(args.starting_balance),
         position_usdt=float(args.position_usdt),
         max_risk_per_trade=float(args.max_risk),
-        fee_rate=float(args.fee_rate),
-        slippage_rate=float(args.slippage_rate),
-        theoretical_max=bool(args.theoretical_max),
-        allowed_regimes=(
-            tuple(x.strip().upper() for x in str(args.allowed_regimes).split(",") if x.strip())
-            if args.allowed_regimes
-            else None
-        ),
-        min_adx_for_buy=(float(args.min_adx_for_buy) if args.min_adx_for_buy is not None else None),
-        min_atr_ratio_for_buy=(
-            float(args.min_atr_ratio_for_buy)
-            if args.min_atr_ratio_for_buy is not None
-            else None
-        ),
-        htf_trend_for_buy=bool(args.htf_trend_for_buy),
-        htf_ema_len=int(args.htf_ema_len),
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        theoretical_max=theoretical_max,
+        personality_mode=str(gate_cfg.personality_mode),
+        safe_threshold=float(gate_cfg.safe_threshold),
+        growth_threshold=float(gate_cfg.growth_threshold),
+        volume_multiplier=float(gate_cfg.volume_multiplier),
+        sma_len=int(gate_cfg.sma_len),
+        allowed_regimes=allowed_regimes,
+        allowed_entry_regimes=allowed_entry_regimes,
+        allow_mean_reversion_in_range=allow_mean_reversion_in_range,
+        min_adx_for_buy=min_adx_for_buy,
+        min_atr_ratio_for_buy=min_atr_ratio_for_buy,
+        htf_trend_for_buy=htf_trend_for_buy,
+        htf_ema_len=htf_ema_len,
+        min_htf_bars=int(gate_cfg.min_htf_bars),
+        ml_model_path=ml_model_path,
+        vol_model_path=vol_model_path,
+        vol_threshold=vol_threshold,
+        cross_require_htf_or_volume=cross_require_htf_or_volume,
+        cross_volume_multiplier=cross_volume_multiplier,
+        cross_volume_sma_len=cross_volume_sma_len,
     )
     if cfg.theoretical_max:
         cfg.fee_rate = 0.0
@@ -721,6 +1139,14 @@ def main() -> None:
                     timeframe="1h",
                     limit=max(300, int(args.limit)),
                 )
+                df_4h = _fetch_window(
+                    exchange,
+                    symbol=symbol_ccxt,
+                    timeframe="4h",
+                    limit=max(300, int(args.limit)),
+                )
+            elif bool(cfg.cross_require_htf_or_volume):
+                # For 1H/4H bots: fetch 4H context so CROSS confirmation can use HTF regime.
                 df_4h = _fetch_window(
                     exchange,
                     symbol=symbol_ccxt,

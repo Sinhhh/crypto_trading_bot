@@ -22,6 +22,9 @@ def _ema_sma_cross_regime(
     *,
     fast_ema: int = 12,
     slow_sma: int = 26,
+    require_price_confirmation: bool = True,
+    min_separation: float = 0.0005,
+    min_adx: float | None = 18.0,
 ) -> str | None:
     if df is None or "close" not in df.columns:
         return None
@@ -44,11 +47,27 @@ def _ema_sma_cross_regime(
     ):
         return None
 
+    if min_adx is not None and "adx" in df.columns:
+        last_adx = float(df["adx"].iloc[-1])
+        if pd.isna(last_adx) or last_adx < float(min_adx):
+            return None
+
+    if float(min_separation) > 0.0:
+        denom = abs(last_slow)
+        if denom == 0.0:
+            return None
+        if abs(last_fast - last_slow) / denom < float(min_separation):
+            return None
+
     crossed_up = prev_fast <= prev_slow and last_fast > last_slow
     crossed_down = prev_fast >= prev_slow and last_fast < last_slow
     if crossed_up:
+        if bool(require_price_confirmation) and not (float(close.iloc[-1]) >= last_slow):
+            return None
         return "CROSS_UP"
     if crossed_down:
+        if bool(require_price_confirmation) and not (float(close.iloc[-1]) <= last_slow):
+            return None
         return "CROSS_DOWN"
     return None
 
@@ -101,7 +120,12 @@ def detect_regime(df: pd.DataFrame) -> str:
         return "RANGE"
 
     # --- TRANSITION / Weak Trend ---
-    cross = _ema_sma_cross_regime(df)
+    cross = _ema_sma_cross_regime(
+        df,
+        require_price_confirmation=True,
+        min_separation=0.0005,
+        min_adx=18.0,
+    )
     if cross is not None:
         return cross
 

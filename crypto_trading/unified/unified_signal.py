@@ -7,7 +7,14 @@ from crypto_trading.strategies.ema_sma_crossover import ema_sma_cross_signal
 from crypto_trading.strategies.breakout import breakout_signal
 
 
-def unified_signal_with_meta(df_1h: pd.DataFrame) -> tuple[str, str, str]:
+def unified_signal_with_meta(
+    df_1h: pd.DataFrame,
+    df_htf: pd.DataFrame | None = None,
+    *,
+    cross_require_htf_or_volume: bool = False,
+    cross_volume_multiplier: float = 1.5,
+    cross_volume_sma_len: int = 20,
+) -> tuple[str, str, str]:
     """Unified signal with metadata.
 
     Returns: (signal, regime, source_strategy)
@@ -16,6 +23,34 @@ def unified_signal_with_meta(df_1h: pd.DataFrame) -> tuple[str, str, str]:
         return "HOLD", "TRANSITION", "none"
 
     regime = detect_regime(df_1h)
+
+    def _cross_confirmed_by_htf(*, direction: str) -> bool:
+        if df_htf is None or len(df_htf) < 220:
+            return False
+        try:
+            htf_regime = str(detect_regime(df_htf)).upper()
+        except Exception:
+            return False
+        if direction == "UP":
+            return htf_regime in {"TREND_UP", "CROSS_UP"}
+        if direction == "DOWN":
+            return htf_regime in {"TREND_DOWN", "CROSS_DOWN"}
+        return False
+
+    def _cross_confirmed_by_volume() -> bool:
+        if df_1h is None or "volume" not in df_1h.columns:
+            return False
+        if int(cross_volume_sma_len) <= 1:
+            return False
+        try:
+            vol = df_1h["volume"].astype(float)
+            avg = vol.rolling(int(cross_volume_sma_len)).mean().iloc[-1]
+            last = float(vol.iloc[-1])
+            if pd.isna(avg) or pd.isna(last):
+                return False
+            return last > float(avg) * float(cross_volume_multiplier)
+        except Exception:
+            return False
 
     # -------------------------
     # TREND REGIMES
@@ -55,11 +90,23 @@ def unified_signal_with_meta(df_1h: pd.DataFrame) -> tuple[str, str, str]:
     # FRESH CROSSOVER REGIMES
     # -------------------------
     if regime == "CROSS_UP":
-        signal = ema_sma_cross_signal(df_1h)
+        if bool(cross_require_htf_or_volume):
+            if not (
+                _cross_confirmed_by_htf(direction="UP")
+                or _cross_confirmed_by_volume()
+            ):
+                return "HOLD", regime, "ema_sma_crossover"
+        signal = ema_sma_cross_signal(df_1h, min_separation=0.0005)
         return ("BUY" if signal == "BUY" else "HOLD"), regime, "ema_sma_crossover"
 
     if regime == "CROSS_DOWN":
-        signal = ema_sma_cross_signal(df_1h)
+        if bool(cross_require_htf_or_volume):
+            if not (
+                _cross_confirmed_by_htf(direction="DOWN")
+                or _cross_confirmed_by_volume()
+            ):
+                return "HOLD", regime, "ema_sma_crossover"
+        signal = ema_sma_cross_signal(df_1h, min_separation=0.0005)
         return ("SELL" if signal == "SELL" else "HOLD"), regime, "ema_sma_crossover"
 
     # -------------------------
@@ -155,7 +202,7 @@ def unified_signal_mtf(
             return "HOLD", "CROSS_UP", "trend"
 
         # Otherwise, allow only stronger crossover signals on 15M
-        cross = ema_sma_cross_signal(df_15m)
+        cross = ema_sma_cross_signal(df_15m, min_separation=0.0005)
         if cross == "BUY":
             return "BUY", "CROSS_UP", "ema_sma_crossover"
 
