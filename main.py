@@ -9,8 +9,9 @@ Folder structure:
 """
 
 import pandas as pd
+
 from src.utils.data_loader import load_csv_data
-from src.strategies.multi_timeframe import generate_signals
+from src.strategies.multi_timeframe import generate_signal
 
 
 # ===========================
@@ -40,7 +41,7 @@ def main():
             continue
 
         # Generate signals using multi-timeframe strategy
-        signals = generate_signals(df_4h, df_1h, df_15m)
+        signals = generate_signal(df_4h, df_1h, df_15m)
 
         # Add metadata
         signals["symbol"] = symbol

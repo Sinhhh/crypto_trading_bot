@@ -5,6 +5,63 @@ Liquidity detection
 import pandas as pd
 
 
+def _cluster_levels(values, indices, tolerance: float):
+    """Group values into tolerance-based clusters.
+
+    Returns list of dicts: {"level": float, "indices": list[int], "min": float, "max": float}
+    """
+    clusters: list[dict] = []
+    for idx, val in zip(indices, values):
+        v = float(val)
+        placed = False
+        for c in clusters:
+            if abs(v - c["level"]) <= c["level"] * tolerance:
+                c["indices"].append(int(idx))
+                c["min"] = min(c["min"], v)
+                c["max"] = max(c["max"], v)
+                # Keep level as simple mean of bounds for stability
+                c["level"] = (c["min"] + c["max"]) / 2.0
+                placed = True
+                break
+        if not placed:
+            clusters.append({"level": v, "indices": [int(idx)], "min": v, "max": v})
+    return clusters
+
+
+def detect_liquidity_zones(
+    df: pd.DataFrame,
+    lookback: int = 60,
+    min_touches: int = 2,
+    tolerance: float = 0.0015,
+) -> dict:
+    """Detect simple equal-highs/equal-lows liquidity zones on 1H.
+
+    Returns:
+        {
+            "equal_highs": list[dict],
+            "equal_lows": list[dict],
+        }
+    """
+    if df is None or df.empty:
+        return {"equal_highs": [], "equal_lows": []}
+
+    if lookback < 5:
+        lookback = min(5, len(df))
+
+    df_recent = df.tail(lookback)
+    highs = df_recent["high"].astype(float).values
+    lows = df_recent["low"].astype(float).values
+    idxs = df_recent.index.values
+
+    high_clusters = _cluster_levels(highs, idxs, tolerance)
+    low_clusters = _cluster_levels(lows, idxs, tolerance)
+
+    equal_highs = [c for c in high_clusters if len(c["indices"]) >= min_touches]
+    equal_lows = [c for c in low_clusters if len(c["indices"]) >= min_touches]
+
+    return {"equal_highs": equal_highs, "equal_lows": equal_lows}
+
+
 def _most_recent_swing_low(lows) -> float | None:
     """Return the most recent local swing low value from a 1D array-like."""
     if len(lows) < 3:

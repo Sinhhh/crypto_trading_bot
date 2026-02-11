@@ -4,7 +4,8 @@ from src.indicators.structure import detect_market_structure, detect_bos_choch
 
 from src.indicators.order_blocks import identify_order_blocks
 from src.indicators.fvg import fair_value_gap
-from src.indicators.liquidity import detect_liquidity_grab
+from src.indicators.liquidity import detect_liquidity_grab, detect_liquidity_zones
+from src.indicators.supply_demand import detect_supply_demand
 
 from src.utils.candle_utils import (
     is_bullish_engulfing,
@@ -22,6 +23,12 @@ RR_MULT = 2.0
 USE_ATR_STOP = True
 ATR_PERIOD = 20
 ATR_MULT = 1.0
+
+# Liquidity zone parameters (1H)
+LIQ_LOOKBACK_1H = 60
+LIQ_MIN_TOUCHES = 1
+LIQ_TOLERANCE = 0.0030
+LIQ_PROXIMITY = 0.0040
 
 
 def _recent_window(df: pd.DataFrame, max_window: int = 120) -> pd.DataFrame:
@@ -155,12 +162,28 @@ def parse_zone(zone):
 # ---------------------------
 def get_4h_bias(df_4h: pd.DataFrame) -> str:
     structure = detect_market_structure(df_4h)
+    supply_zones, demand_zones = detect_supply_demand(df_4h)
+
+    last_close = None
+    if df_4h is not None and len(df_4h) > 0:
+        last_close = float(df_4h.iloc[-1]["close"])
+
+    def _in_zone(price: float, zone: dict) -> bool:
+        return float(zone["low"]) <= price <= float(zone["high"])
 
     # 4H responsibility: define direction (bias) and key zones (context).
     # Bias must be BUY/SELL only when structure is clear.
     if structure == "UP":
+        if last_close is not None:
+            for z in supply_zones:
+                if _in_zone(last_close, z):
+                    return "HOLD"
         return "BUY"
     if structure == "DOWN":
+        if last_close is not None:
+            for z in demand_zones:
+                if _in_zone(last_close, z):
+                    return "HOLD"
         return "SELL"
     return "HOLD"
 
@@ -175,6 +198,7 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
         "BOS": False,
         "CHOCH": False,
         "in_OB_FVG": False,
+        "liquidity_zone_ok": False,
     }
 
     if bias == "HOLD" or len(df_1h) < 3:
@@ -213,12 +237,45 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
 
     result["in_OB_FVG"] = in_zone
 
+    # Liquidity zones (equal highs/lows) on 1H
+    liq = detect_liquidity_zones(
+        df_1h,
+        lookback=LIQ_LOOKBACK_1H,
+        min_touches=LIQ_MIN_TOUCHES,
+        tolerance=LIQ_TOLERANCE,
+    )
+    last_close = float(last_candle["close"])
+
+    def _near_level(level: float) -> bool:
+        return abs(last_close - float(level)) / max(last_close, 1e-9) <= LIQ_PROXIMITY
+
+    if bias == "BUY":
+        result["liquidity_zone_ok"] = any(
+            _near_level(z["level"]) for z in liq.get("equal_lows", [])
+        )
+    elif bias == "SELL":
+        result["liquidity_zone_ok"] = any(
+            _near_level(z["level"]) for z in liq.get("equal_highs", [])
+        )
+
     # Setup logic (1H): align with 4H bias + structure, require a footprint (BOS or CHOCH) and good location
     footprint_ok = bool(bos or choch)
 
-    if bias == "BUY" and structure == "UP" and footprint_ok and in_zone:
+    if (
+        bias == "BUY"
+        and structure == "UP"
+        and footprint_ok
+        and in_zone
+        and result["liquidity_zone_ok"]
+    ):
         result["setup_valid"] = True
-    elif bias == "SELL" and structure == "DOWN" and footprint_ok and in_zone:
+    elif (
+        bias == "SELL"
+        and structure == "DOWN"
+        and footprint_ok
+        and in_zone
+        and result["liquidity_zone_ok"]
+    ):
         result["setup_valid"] = True
 
     return result
@@ -301,8 +358,18 @@ def get_15m_entry(
             )
 
     # Candle confirmation patterns (15M confirmation only; no trend definition here)
+    bullish_reclaim_ok = bool(
+        recent["close"] > prev["high"] and recent["close"] > recent["open"]
+    )
+    bearish_reclaim_ok = bool(
+        recent["close"] < prev["low"] and recent["close"] < recent["open"]
+    )
+
     if bias == "BUY" and not (
-        is_bullish_engulfing(prev, recent) or is_hammer(recent) or inside_breakout_ok
+        is_bullish_engulfing(prev, recent)
+        or is_hammer(recent)
+        or inside_breakout_ok
+        or bullish_reclaim_ok
     ):
         result["reason"] = "NO_BULLISH_CONFIRM"
         return result
@@ -310,6 +377,7 @@ def get_15m_entry(
         is_bearish_engulfing(prev, recent)
         or is_bearish_pinbar(recent)
         or inside_breakout_ok
+        or bearish_reclaim_ok
     ):
         result["reason"] = "NO_BEARISH_CONFIRM"
         return result
@@ -356,8 +424,3 @@ def generate_signal(df_4h, df_1h, df_15m) -> dict:
         "setup_valid": bool(setup_1h.get("setup_valid")),
         "entry_signal": bool(entry_15m.get("entry_signal")),
     }
-
-
-def generate_signals(df_4h, df_1h, df_15m) -> dict:
-    """Backward-compatible wrapper expected by main.py."""
-    return generate_signal(df_4h, df_1h, df_15m)
