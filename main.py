@@ -10,8 +10,8 @@ Folder structure:
 
 import pandas as pd
 
-from src.utils.data_loader import load_csv_data
-from src.strategies.multi_timeframe import generate_signal
+from utils.data_loader import load_csv_data
+from strategies.multi_timeframe import generate_signal
 
 
 # ===========================

@@ -12,13 +12,13 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.strategies.multi_timeframe import generate_signal
-from src.utils.data_loader import load_csv_data, normalize_ohlcv
+from strategies.multi_timeframe import generate_signal
+from utils.data_loader import load_csv_data, normalize_ohlcv
 
 # -------------------------------
 # Logging setup
 # -------------------------------
-LOG_FOLDER = os.path.join("backtest", "logs")
+LOG_FOLDER = "logs"
 os.makedirs(LOG_FOLDER, exist_ok=True)
 
 log_filename = datetime.now().strftime("backtest_%Y%m%d_%H%M%S.log")

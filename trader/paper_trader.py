@@ -10,12 +10,12 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from src.strategies.multi_timeframe import generate_signal
-from src.utils.data_loader import normalize_ohlcv
+from strategies.multi_timeframe import generate_signal
+from utils.data_loader import normalize_ohlcv
 
-from paper.exchange_ccxt import CCXTExchange
-from paper.broker_sim import BrokerSim
-from paper.risk_manager import RiskConfig, RiskManager
+from exchange.ccxt_exchange import CCXTExchange
+from broker.broker_sim import BrokerSim
+from broker.risk_manager import RiskConfig, RiskManager
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class PaperConfig:
     limit_15m: int = 240
     poll_seconds: int = 30
     close_on_sell_bias: bool = True
-    log_path: str = "paper/logs/paper.log"
+    log_path: str = "logs/paper.log"
 
 
 def _utc_iso() -> str:
@@ -331,7 +331,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--poll", type=int, default=30)
     p.add_argument("--cash", type=float, default=10_000.0)
     p.add_argument("--risk", type=float, default=0.01)
-    p.add_argument("--log", type=str, default="paper/logs/paper.log")
+    p.add_argument("--log", type=str, default="logs/paper.log")
     return p
 
 

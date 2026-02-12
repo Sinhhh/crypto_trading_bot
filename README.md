@@ -40,21 +40,20 @@ This repo includes:
      - `stop` (structure-based, with optional ATR minimum distance)
      - `target` (RR-based)
 
-The main “signal” output is produced by `generate_signal()` in [src/strategies/multi_timeframe.py](src/strategies/multi_timeframe.py).
+The main “signal” output is produced by `generate_signal()` in [strategies/multi_timeframe.py](strategies/multi_timeframe.py).
 
 ---
 
 ## Repo Layout
 
-- [src/](src/)
-  - [src/strategies/](src/strategies/): strategy pipeline
-  - [src/indicators/](src/indicators/): structure, BOS/CHOCH, OB, FVG, liquidity grab detection
-  - [src/utils/](src/utils/): data/candle helpers
-  - [src/paper/](src/paper/): paper trading implementation
-- [backtest/](backtest/)
-  - [backtest/backtest.py](backtest/backtest.py): CSV backtest runner + trade log output
-- [paper/](paper/)
-  - [paper/paper_trader.py](paper/paper_trader.py): compatibility wrapper (keeps `python3 -m paper.paper_trader` working)
+- [strategies/](strategies/): strategy pipeline
+- [indicators/](indicators/): structure, BOS/CHOCH, OB, FVG, liquidity grab detection
+- [utils/](utils/): data/candle helpers
+- [broker/](broker/): broker simulation + risk manager
+- [exchange/](exchange/): ccxt exchange wrapper
+- [trader/](trader/): paper trader implementation
+- [backtest.py](backtest.py): CSV backtest runner + trade log output
+- [logs/](logs/): per-run log files
 - [data/raw/](data/raw/)
   - CSV candles for BTC/ETH at 15M/1H/4H
 
@@ -83,18 +82,18 @@ Paper trading fetches market data from Binance using `ccxt`.
 Run:
 
 ```bash
-python3 -m backtest.backtest
+python3 -m backtest
 ```
 
 Options:
 
 ```bash
-python3 -m backtest.backtest --symbols BTC --log-skips
+python3 -m backtest --symbols BTC --log-skips
 ```
 
 Output:
 - Console logs include `TRADE | ...` lines when trades trigger.
-- Backtest results are written to the log file in backtest/logs (no CSV output).
+- Backtest results are written to logs/backtest_YYYYMMDD_HHMMSS.log (no CSV output).
 
 Trade log format example:
 
@@ -117,14 +116,14 @@ The paper trader:
 Run:
 
 ```bash
-python3 -m paper.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30
+python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30
 ```
 
 Useful options:
 
 ```bash
-python3 -m paper.paper_trader --exchange binance --symbols BTC/USDT --poll 5 --cash 10000 --risk 0.01 \
-  --log paper/logs/paper.log
+python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT --poll 5 --cash 10000 --risk 0.01 \
+  --log logs/paper.log
 ```
 
 Console output:
@@ -174,13 +173,13 @@ Outputs:
 ## Risk Management
 
 ### Stop and target
-Implemented in [src/strategies/multi_timeframe.py](src/strategies/multi_timeframe.py):
+Implemented in [strategies/multi_timeframe.py](strategies/multi_timeframe.py):
 - Stop starts as structure-based (15M candle high/low).
 - Optional ATR guard (enabled by default): enforce a minimum stop distance using **15M ATR(20) × 1.0**.
 - Target is RR-based: `target = entry ± RR_MULT × |entry - stop|`.
 
 ### Paper sizing
-Implemented in [paper/risk_manager.py](paper/risk_manager.py):
+Implemented in [broker/risk_manager.py](broker/risk_manager.py):
 - Position size uses equity risk percent and stop distance.
 - Also caps notional and applies a minimum notional guard.
 
@@ -227,9 +226,9 @@ These ideas keep the same 4H/1H/15M framework and remain deterministic:
 ## Quick Start
 
 - Backtest:
-  - `python3 -m backtest.backtest --symbols BTC,ETH`
+  - `python3 -m backtest --symbols BTC,ETH`
 
 - Paper trade (spot-only):
-  - `python3 -m paper.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30`
+  - `python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30`
 
 If you want, tell me whether you trade **spot only** or also want **perpetuals** later; I can keep the framework identical and only change the execution layer accordingly.

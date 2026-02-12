@@ -12,8 +12,8 @@ Optimized candle fetcher for BTC & ETH
 from datetime import datetime
 import os
 import argparse
-from src.utils.market_data import fetch_ohlcv
-from src.utils.data_loader import normalize_ohlcv
+from utils.market_data import fetch_ohlcv
+from utils.data_loader import normalize_ohlcv
 
 # -------------------------------
 # CONFIG
