@@ -4,13 +4,13 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RiskConfig:
     # Risk sizing: use stop distance and equity
-    risk_pct: float = 0.01          # Max % of equity risked per trade
+    risk_pct: float = 0.01  # Max % of equity risked per trade
     max_notional_pct: float = 0.95  # Cap exposure to 95% of equity
 
     # Minimum notional guard (avoid dust trades)
-    min_notional_usdt: float = 10.0 # Avoid tiny “dust” trades
+    min_notional_usdt: float = 10.0  # Avoid tiny “dust” trades
     fee_pct: float = 0.0005
-    slippage_pct: float = 0.001     # Slippage (0.1%)
+    slippage_pct: float = 0.001  # Slippage (0.1%)
 
 
 class RiskManager:
@@ -21,19 +21,17 @@ class RiskManager:
         """
         Compute long position size with fees and slippage.
         """
-        return self._compute_size(
-            equity_usdt, entry, stop, direction="long"
-        )
+        return self._compute_size(equity_usdt, entry, stop, direction="long")
 
     def size_for_short(self, equity_usdt: float, entry: float, stop: float) -> float:
         """
         Compute short position size with fees and slippage.
         """
-        return self._compute_size(
-            equity_usdt, entry, stop, direction="short"
-        )
+        return self._compute_size(equity_usdt, entry, stop, direction="short")
 
-    def _compute_size(self, equity_usdt: float, entry: float, stop: float, direction: str) -> float:
+    def _compute_size(
+        self, equity_usdt: float, entry: float, stop: float, direction: str
+    ) -> float:
         equity = float(equity_usdt)
         entry_f = float(entry)
         stop_f = float(stop)

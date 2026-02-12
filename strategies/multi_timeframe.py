@@ -1,7 +1,10 @@
 import pandas as pd
 
 from indicators.structure import detect_bos_choch_clean, detect_market_structure
-from indicators.order_blocks import filter_fresh_order_blocks, identify_order_blocks_clean
+from indicators.order_blocks import (
+    filter_fresh_order_blocks,
+    identify_order_blocks_clean,
+)
 from indicators.fvg import fair_value_gap_ict, identify_fvg_clean
 from indicators.liquidity import detect_liquidity_grab, detect_liquidity_zones
 from indicators.supply_demand import detect_supply_demand
@@ -56,11 +59,10 @@ def _atr(df: pd.DataFrame, period: int) -> float | None:
         return None
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
     atr = tr.rolling(period, min_periods=period).mean()
     last = atr.iloc[-1]
     return float(last) if pd.notna(last) and last > 0 else None
@@ -75,7 +77,8 @@ def parse_zone(zone):
         typ = zone.get("type") or zone.get("direction")
         low = zone.get("low") or zone.get("start") or zone.get("min")
         high = zone.get("high") or zone.get("end") or zone.get("max")
-        if low is None or high is None: raise ValueError(zone)
+        if low is None or high is None:
+            raise ValueError(zone)
         return float(min(low, high)), float(max(low, high)), typ
     if isinstance(zone, (list, tuple)):
         if len(zone) >= 4 and isinstance(zone[1], str) and zone[1] in ("BULL", "BEAR"):
@@ -146,16 +149,14 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     structure = detect_market_structure(df_1h)
     bos, choch, break_dir = detect_bos_choch_clean(df_1h, structure)
 
-    result.update({
-        "structure": structure,
-        "BOS": bos,
-        "CHOCH": choch,
-        "break_dir": break_dir
-    })
+    result.update(
+        {"structure": structure, "BOS": bos, "CHOCH": choch, "break_dir": break_dir}
+    )
 
     # Direction alignment check
-    if (bias == "BUY" and (structure != "UP" or break_dir != "BULL")) or \
-       (bias == "SELL" and (structure != "DOWN" or break_dir != "BEAR")):
+    if (bias == "BUY" and (structure != "UP" or break_dir != "BULL")) or (
+        bias == "SELL" and (structure != "DOWN" or break_dir != "BEAR")
+    ):
         return result
 
     # -------------------------
@@ -177,10 +178,7 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     # -------------------------
     # Order Blocks
     # -------------------------
-    obs = filter_fresh_order_blocks(
-        df_1h,
-        identify_order_blocks_clean(df_1h)
-    )
+    obs = filter_fresh_order_blocks(df_1h, identify_order_blocks_clean(df_1h))
     obs = [z for z in obs if z["type"] == ("BULL" if bias == "BUY" else "BEAR")]
 
     # -------------------------
@@ -218,13 +216,18 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     )
 
     last_close = float(df_1h.iloc[-1]["close"])
+
     def _near(level: float) -> bool:
         return abs(last_close - float(level)) / max(last_close, 1e-9) <= LIQ_PROXIMITY
 
     if bias == "BUY":
-        result["liquidity_zone_ok"] = any(_near(z["level"]) for z in liq.get("equal_lows", []))
+        result["liquidity_zone_ok"] = any(
+            _near(z["level"]) for z in liq.get("equal_lows", [])
+        )
     else:
-        result["liquidity_zone_ok"] = any(_near(z["level"]) for z in liq.get("equal_highs", []))
+        result["liquidity_zone_ok"] = any(
+            _near(z["level"]) for z in liq.get("equal_highs", [])
+        )
 
     # -------------------------
     # Final validation
@@ -241,7 +244,9 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
 # ---------------------------
 # 15M ENTRY (cleaned)
 # ---------------------------
-def get_15m_entry(df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_list: list) -> dict:
+def get_15m_entry(
+    df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_list: list
+) -> dict:
     """
     Compute 15M entry signals based on 1H zones (OB/FVG):
     - Requires 1H setup to be valid
@@ -287,7 +292,11 @@ def get_15m_entry(df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_lis
         if bias == "BUY" and typ == "BULL" and _candle_overlaps_zone(recent, low, high):
             in_zone = True
             break
-        if bias == "SELL" and typ == "BEAR" and _candle_overlaps_zone(recent, low, high):
+        if (
+            bias == "SELL"
+            and typ == "BEAR"
+            and _candle_overlaps_zone(recent, low, high)
+        ):
             in_zone = True
             break
 
@@ -305,15 +314,29 @@ def get_15m_entry(df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_lis
     inside_breakout_ok = False
     if is_inside_bar(prev2, prev):
         if bias == "BUY":
-            inside_breakout_ok = recent["close"] > prev2["high"] and recent["close"] > recent["open"]
+            inside_breakout_ok = (
+                recent["close"] > prev2["high"] and recent["close"] > recent["open"]
+            )
         elif bias == "SELL":
-            inside_breakout_ok = recent["close"] < prev2["low"] and recent["close"] < recent["open"]
+            inside_breakout_ok = (
+                recent["close"] < prev2["low"] and recent["close"] < recent["open"]
+            )
 
     # -------------------------
     # 15M confirmation patterns
     # -------------------------
-    bullish_ok = is_bullish_engulfing(prev, recent) or is_hammer(recent) or inside_breakout_ok or recent["close"] > prev["high"]
-    bearish_ok = is_bearish_engulfing(prev, recent) or is_bearish_pinbar(recent) or inside_breakout_ok or recent["close"] < prev["low"]
+    bullish_ok = (
+        is_bullish_engulfing(prev, recent)
+        or is_hammer(recent)
+        or inside_breakout_ok
+        or recent["close"] > prev["high"]
+    )
+    bearish_ok = (
+        is_bearish_engulfing(prev, recent)
+        or is_bearish_pinbar(recent)
+        or inside_breakout_ok
+        or recent["close"] < prev["low"]
+    )
 
     if (bias == "BUY" and not bullish_ok) or (bias == "SELL" and not bearish_ok):
         result["reason"] = "NO_CONFIRM_CANDLE"
@@ -327,15 +350,18 @@ def get_15m_entry(df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_lis
         result["reason"] = "LEVELS_UNAVAILABLE"
         return result
 
-    result.update({
-        "entry_signal": True,
-        "entry_price": entry,
-        "stop": stop,
-        "target": target,
-        "reason": "TRADE_OK",
-    })
+    result.update(
+        {
+            "entry_signal": True,
+            "entry_price": entry,
+            "stop": stop,
+            "target": target,
+            "reason": "TRADE_OK",
+        }
+    )
 
     return result
+
 
 # ---------------------------
 # FULL SIGNAL GENERATOR (cleaned)
@@ -345,12 +371,7 @@ def generate_signal(df_4h, df_1h, df_15m) -> dict:
     setup_1h = get_1h_setup(df_1h, bias)
 
     zones_1h = setup_1h.get("zones", [])
-    entry_15m = get_15m_entry(
-        df_15m,
-        bias,
-        setup_1h["setup_valid"],
-        zones_1h
-    )
+    entry_15m = get_15m_entry(df_15m, bias, setup_1h["setup_valid"], zones_1h)
 
     return {
         "bias_4h": bias,

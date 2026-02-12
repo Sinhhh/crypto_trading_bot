@@ -58,7 +58,6 @@ LOOKBACK_1H = 200  # ~8+ days
 LOOKBACK_4H = 100  # ~16+ days
 
 
-
 def _parse_symbols(raw: str | None) -> list[str]:
     if not raw:
         return list(DEFAULT_SYMBOLS)
@@ -77,9 +76,15 @@ def _parse_symbols(raw: str | None) -> list[str]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SMC multi-timeframe backtest (BTC/ETH)")
-    parser.add_argument("--symbols", type=str, default=None, help="Comma-separated list: BTC,ETH")
-    parser.add_argument("--log-skips", action="store_true", help="Print per-candle SKIP reasons")
+    parser = argparse.ArgumentParser(
+        description="SMC multi-timeframe backtest (BTC/ETH)"
+    )
+    parser.add_argument(
+        "--symbols", type=str, default=None, help="Comma-separated list: BTC,ETH"
+    )
+    parser.add_argument(
+        "--log-skips", action="store_true", help="Print per-candle SKIP reasons"
+    )
     return parser
 
 
@@ -121,7 +126,11 @@ def simulate_trade_15m(
                 return entry_price - target, j, candle["timestamp"], "TARGET"
 
     last = df_15m.iloc[end_idx]
-    pnl = (last["close"] - entry_price) if bias == "BUY" else (entry_price - last["close"])
+    pnl = (
+        (last["close"] - entry_price)
+        if bias == "BUY"
+        else (entry_price - last["close"])
+    )
     return pnl, end_idx, last["timestamp"], "TIME_EXIT"
 
 
@@ -173,7 +182,9 @@ def backtest_symbol_safe(symbol):
 
         if not setup["setup_valid"] or bias == "HOLD" or not entry["entry_signal"]:
             if LOG_SKIPS:
-                logger.info(f"SKIP | {symbol} | bias={bias} | setup_valid={setup['setup_valid']} | reason={entry.get('reason','N/A')}")
+                logger.info(
+                    f"SKIP | {symbol} | bias={bias} | setup_valid={setup['setup_valid']} | reason={entry.get('reason','N/A')}"
+                )
             continue
 
         entry_price = entry["entry_price"]
@@ -190,32 +201,42 @@ def backtest_symbol_safe(symbol):
         in_trade = True
         trade_exit_idx = exit_idx
 
-        trades.append({
-            "symbol": symbol,
-            "entry_ts": ts,
-            "exit_ts": exit_ts,
-            "bias": bias,
-            "entry": entry_price,
-            "stop": stop,
-            "target": target,
-            "exit_reason": exit_reason,
-            "pnl_usd": pnl_usd,
-            "capital": capital,
-        })
+        trades.append(
+            {
+                "symbol": symbol,
+                "entry_ts": ts,
+                "exit_ts": exit_ts,
+                "bias": bias,
+                "entry": entry_price,
+                "stop": stop,
+                "target": target,
+                "exit_reason": exit_reason,
+                "pnl_usd": pnl_usd,
+                "capital": capital,
+            }
+        )
 
-        logger.info(f"TRADE | {symbol} | {bias} | Entry: {entry_price:.2f} | Exit: {exit_reason} | PnL: {pnl_usd:.2f} | Capital: {capital:.2f}")
+        logger.info(
+            f"TRADE | {symbol} | {bias} | Entry: {entry_price:.2f} | Exit: {exit_reason} | PnL: {pnl_usd:.2f} | Capital: {capital:.2f}"
+        )
 
     df_trades = pd.DataFrame(trades)
 
     # Summary
     total_pnl = df_trades["pnl_usd"].sum() if not df_trades.empty else 0.0
-    winrate = (len(df_trades[df_trades["pnl_usd"] > 0]) / len(df_trades) * 100) if len(df_trades) else 0.0
+    winrate = (
+        (len(df_trades[df_trades["pnl_usd"] > 0]) / len(df_trades) * 100)
+        if len(df_trades)
+        else 0.0
+    )
     buy_count = int((df_trades["bias"] == "BUY").sum()) if not df_trades.empty else 0
     sell_count = int((df_trades["bias"] == "SELL").sum()) if not df_trades.empty else 0
 
     logger.info(f"\n=== BACKTEST SUMMARY | {symbol} ===")
     logger.info(f"Trades: {len(df_trades)} | BUY: {buy_count} | SELL: {sell_count}")
-    logger.info(f"Winrate: {winrate:.2f}% | Final capital: {capital:.2f} USD | Total PnL: {total_pnl:.2f} USD")
+    logger.info(
+        f"Winrate: {winrate:.2f}% | Final capital: {capital:.2f} USD | Total PnL: {total_pnl:.2f} USD"
+    )
 
     return df_trades
 

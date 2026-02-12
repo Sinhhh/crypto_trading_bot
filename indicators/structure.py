@@ -30,7 +30,10 @@ def _find_swings(df: pd.DataFrame, left: int = 1, right: int = 1):
 
     return swing_highs, swing_lows
 
-def _find_swings_robust(df: pd.DataFrame, left: int = 2, right: int = 2, min_range_ratio: float = 0.5):
+
+def _find_swings_robust(
+    df: pd.DataFrame, left: int = 2, right: int = 2, min_range_ratio: float = 0.5
+):
     """
     Tìm swing highs/lows robust hơn.
 
@@ -51,29 +54,34 @@ def _find_swings_robust(df: pd.DataFrame, left: int = 2, right: int = 2, min_ran
 
     # Tính ATR để làm ngưỡng biến động
     df = df.copy()
-    df['prev_close'] = df['close'].shift(1)
-    tr = pd.concat([
-        (df['high'] - df['low']).abs(),
-        (df['high'] - df['prev_close']).abs(),
-        (df['low'] - df['prev_close']).abs()
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(left+right+1, min_periods=1).mean()
-    
-    highs = df['high'].values
-    lows = df['low'].values
+    df["prev_close"] = df["close"].shift(1)
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]).abs(),
+            (df["high"] - df["prev_close"]).abs(),
+            (df["low"] - df["prev_close"]).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(left + right + 1, min_periods=1).mean()
+
+    highs = df["high"].values
+    lows = df["low"].values
     atr_values = atr.values
 
     for i in range(left, len(df) - right):
         # Swing high
-        left_high = highs[i-left:i].max() if left > 0 else highs[i]
-        right_high = highs[i+1:i+right+1].max() if right > 0 else highs[i]
+        left_high = highs[i - left : i].max() if left > 0 else highs[i]
+        right_high = highs[i + 1 : i + right + 1].max() if right > 0 else highs[i]
         if highs[i] > left_high and highs[i] > right_high:
-            if (highs[i] - min(left_high, right_high)) >= min_range_ratio * atr_values[i]:
+            if (highs[i] - min(left_high, right_high)) >= min_range_ratio * atr_values[
+                i
+            ]:
                 swing_highs.append((i, float(highs[i])))
 
         # Swing low
-        left_low = lows[i-left:i].min() if left > 0 else lows[i]
-        right_low = lows[i+1:i+right+1].min() if right > 0 else lows[i]
+        left_low = lows[i - left : i].min() if left > 0 else lows[i]
+        right_low = lows[i + 1 : i + right + 1].min() if right > 0 else lows[i]
         if lows[i] < left_low and lows[i] < right_low:
             if (max(left_low, right_low) - lows[i]) >= min_range_ratio * atr_values[i]:
                 swing_lows.append((i, float(lows[i])))
@@ -86,7 +94,9 @@ def detect_market_structure(df: pd.DataFrame) -> str:
     Returns: 'UP', 'DOWN', 'SIDEWAY'
     Deterministic HH/HL vs LH/LL using the last two swing highs and lows.
     """
-    swing_highs, swing_lows = _find_swings_robust(df, left=2, right=2, min_range_ratio=0.5)
+    swing_highs, swing_lows = _find_swings_robust(
+        df, left=2, right=2, min_range_ratio=0.5
+    )
 
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return "SIDEWAY"

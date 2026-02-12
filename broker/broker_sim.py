@@ -86,7 +86,12 @@ class BrokerSim:
             target=float(target),
             opened_at=datetime.now(timezone.utc).isoformat(),
         )
-        return {"ok": True, "filled_price": px_effective, "notional": notional, "fee": fee}
+        return {
+            "ok": True,
+            "filled_price": px_effective,
+            "notional": notional,
+            "fee": fee,
+        }
 
     def close_long(self, symbol: str, price: float, reason: str) -> dict:
         pos = self.positions.get(symbol)
@@ -142,7 +147,12 @@ class BrokerSim:
             opened_at=datetime.now(timezone.utc).isoformat(),
             margin=float(margin),
         )
-        return {"ok": True, "filled_price": px_effective, "notional": notional, "fee": fee}
+        return {
+            "ok": True,
+            "filled_price": px_effective,
+            "notional": notional,
+            "fee": fee,
+        }
 
     def close_short(self, symbol: str, price: float, reason: str) -> dict:
         pos = self.positions.get(symbol)

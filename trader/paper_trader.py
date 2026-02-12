@@ -58,7 +58,6 @@ def _setup_logger(log_path: str) -> logging.Logger:
     return logger
 
 
-
 class PaperTrader:
     def __init__(
         self,
@@ -182,10 +181,19 @@ class PaperTrader:
                 reason=str(exit_fill.get("reason")),
             )
             self._log_event(
-                symbol, f"EXIT_{exit_fill['reason']}", None, None, None,
-                entry_val, stop_val, target_val, amount_val,
-                exit_fill.get("filled_price"), float(exit_fill["pnl"]),
-                eq_after, exit_fill.get("reason")
+                symbol,
+                f"EXIT_{exit_fill['reason']}",
+                None,
+                None,
+                None,
+                entry_val,
+                stop_val,
+                target_val,
+                amount_val,
+                exit_fill.get("filled_price"),
+                float(exit_fill["pnl"]),
+                eq_after,
+                exit_fill.get("reason"),
             )
         df_4h, df_1h, df_15m = self._fetch_context(symbol)
         sig = generate_signal(df_4h, df_1h, df_15m)
@@ -195,10 +203,7 @@ class PaperTrader:
         entry_signal = bool(sig["entry_signal"])
 
         entry_meta = sig.get("entry_15m") or {}
-        entry_price = (
-            entry_meta.get("entry_price")
-            or entry_meta.get("filled_price")
-        )
+        entry_price = entry_meta.get("entry_price") or entry_meta.get("filled_price")
         stop = entry_meta.get("stop")
         target = entry_meta.get("target")
         entry_reason = entry_meta.get("reason")
@@ -207,9 +212,13 @@ class PaperTrader:
         pos_now = self.broker.get_position(symbol)
         if self.cfg.close_on_sell_bias and pos_now and bias in ("BUY", "SELL"):
             if pos_now.side == "LONG" and bias == "SELL":
-                fill = self.broker.close_long(symbol, float(last_price), reason="BIAS_FLIP")
+                fill = self.broker.close_long(
+                    symbol, float(last_price), reason="BIAS_FLIP"
+                )
             elif pos_now.side == "SHORT" and bias == "BUY":
-                fill = self.broker.close_short(symbol, float(last_price), reason="BIAS_FLIP")
+                fill = self.broker.close_short(
+                    symbol, float(last_price), reason="BIAS_FLIP"
+                )
             else:
                 fill = None
 
@@ -226,47 +235,109 @@ class PaperTrader:
                     reason="BIAS_FLIP",
                 )
                 self._log_event(
-                    symbol, "EXIT_BIAS_FLIP", bias, None, None,
-                    float(pos_now.entry), float(pos_now.stop), float(pos_now.target),
-                    float(pos_now.amount), fill.get("filled_price"), float(fill["pnl"]),
-                    eq_after, "BIAS_FLIP"
+                    symbol,
+                    "EXIT_BIAS_FLIP",
+                    bias,
+                    None,
+                    None,
+                    float(pos_now.entry),
+                    float(pos_now.stop),
+                    float(pos_now.target),
+                    float(pos_now.amount),
+                    fill.get("filled_price"),
+                    float(fill["pnl"]),
+                    eq_after,
+                    "BIAS_FLIP",
                 )
                 return
 
         if bias not in ("BUY", "SELL"):
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity, "BIAS_HOLD"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                "BIAS_HOLD",
             )
             return
 
         if not setup_valid:
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity, "SETUP_INVALID"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                "SETUP_INVALID",
             )
             return
 
         if not entry_signal:
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity,
-                entry_reason or "ENTRY_SIGNAL_FALSE"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                entry_reason or "ENTRY_SIGNAL_FALSE",
             )
             return
 
         if entry_price is None or stop is None or target is None:
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity,
-                "ENTRY_LEVELS_MISSING"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                "ENTRY_LEVELS_MISSING",
             )
             return
 
         if self.broker.get_position(symbol):
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity, "POSITION_EXISTS"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                "POSITION_EXISTS",
             )
             return
 
@@ -283,8 +354,19 @@ class PaperTrader:
 
         if amount <= 0:
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, 0.0, None, None, equity, "RISK_SIZING_ZERO"
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                0.0,
+                None,
+                None,
+                equity,
+                "RISK_SIZING_ZERO",
             )
             return
 
@@ -296,9 +378,7 @@ class PaperTrader:
 
         if fill.get("ok"):
             filled_price = (
-                fill.get("entry_price")
-                or fill.get("filled_price")
-                or entry_price
+                fill.get("entry_price") or fill.get("filled_price") or entry_price
             )
 
             eq_after = self.broker.equity_usdt()
@@ -312,15 +392,35 @@ class PaperTrader:
                 reason="OPEN",
             )
             self._log_event(
-                symbol, "TRADE_OPEN", bias, setup_valid, entry_signal,
-                entry_price, stop, target, amount, filled_price, 0.0,
-                eq_after, None
+                symbol,
+                "TRADE_OPEN",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                amount,
+                filled_price,
+                0.0,
+                eq_after,
+                None,
             )
         else:
             self._log_event(
-                symbol, "EVAL", bias, setup_valid, entry_signal,
-                entry_price, stop, target, amount, None, None, equity,
-                str(fill.get("reason"))
+                symbol,
+                "EVAL",
+                bias,
+                setup_valid,
+                entry_signal,
+                entry_price,
+                stop,
+                target,
+                amount,
+                None,
+                None,
+                equity,
+                str(fill.get("reason")),
             )
 
 
@@ -356,7 +456,9 @@ def main() -> None:
     )
     trader = PaperTrader(cfg, ex, broker, risk, logger)
 
-    print(f"=== Starting paper trader | Symbols: {cfg.symbols} | Cash: {broker.cash_usdt:.2f}\n")
+    print(
+        f"=== Starting paper trader | Symbols: {cfg.symbols} | Cash: {broker.cash_usdt:.2f}\n"
+    )
     while True:
         for sym in cfg.symbols:
             try:
@@ -364,9 +466,19 @@ def main() -> None:
             except Exception as e:
                 logger.exception(f"ERROR | {sym} | {e}")
                 trader._log_event(
-                    sym, "ERROR", None, None, None,
-                    None, None, None, None, None, None,
-                    broker.equity_usdt(), str(e)
+                    sym,
+                    "ERROR",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    broker.equity_usdt(),
+                    str(e),
                 )
         time.sleep(cfg.poll_seconds)
 

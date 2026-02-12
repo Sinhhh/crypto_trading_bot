@@ -62,22 +62,26 @@ def identify_order_blocks_clean(df: pd.DataFrame):
         # Bullish OB
         if c["close"] < c["open"]:
             if caused_directional_impulse(df, i, "BULL"):
-                obs.append({
-                    "index": i,
-                    "type": "BULL",
-                    "low": float(c["low"]),
-                    "high": float(c["open"]),  # body only (ICT style)
-                })
+                obs.append(
+                    {
+                        "index": i,
+                        "type": "BULL",
+                        "low": float(c["low"]),
+                        "high": float(c["open"]),  # body only (ICT style)
+                    }
+                )
 
         # Bearish OB
         if c["close"] > c["open"]:
             if caused_directional_impulse(df, i, "BEAR"):
-                obs.append({
-                    "index": i,
-                    "type": "BEAR",
-                    "low": float(c["open"]),
-                    "high": float(c["high"]),
-                })
+                obs.append(
+                    {
+                        "index": i,
+                        "type": "BEAR",
+                        "low": float(c["open"]),
+                        "high": float(c["high"]),
+                    }
+                )
 
     return obs
 

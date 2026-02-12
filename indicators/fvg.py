@@ -36,7 +36,7 @@ def fair_value_gap_ict(
     for i in range(2, len(df)):
         c1 = df.iloc[i - 2]  # candle trước
         c2 = df.iloc[i - 1]  # displacement candle
-        c3 = df.iloc[i]      # candle sau
+        c3 = df.iloc[i]  # candle sau
 
         # Displacement candle stats
         body = abs(c2["close"] - c2["open"])
@@ -100,7 +100,7 @@ def in_equilibrium(
     tolerance: float = 0.15,
 ) -> bool:
     start = max(0, idx - lookback)
-    segment = df.iloc[start:idx + 1]
+    segment = df.iloc[start : idx + 1]
 
     hi = segment["high"].max()
     lo = segment["low"].min()
@@ -149,13 +149,15 @@ def identify_fvg_clean(
                 gap = c3["low"] - c1["high"]
                 if gap / c2["close"] >= min_gap_ratio:
                     weak = equilibrium_filter and in_equilibrium(df, i - 1)
-                    fvgs.append({
-                        "index": i - 1,
-                        "type": "BULL",
-                        "low": float(c1["high"]),
-                        "high": float(c3["low"]),
-                        "strength": "WEAK" if weak else "STRONG",
-                    })
+                    fvgs.append(
+                        {
+                            "index": i - 1,
+                            "type": "BULL",
+                            "low": float(c1["high"]),
+                            "high": float(c3["low"]),
+                            "strength": "WEAK" if weak else "STRONG",
+                        }
+                    )
 
         # -----------------
         # Bearish FVG
@@ -165,12 +167,14 @@ def identify_fvg_clean(
                 gap = c1["low"] - c3["high"]
                 if gap / c2["close"] >= min_gap_ratio:
                     weak = equilibrium_filter and in_equilibrium(df, i - 1)
-                    fvgs.append({
-                        "index": i - 1,
-                        "type": "BEAR",
-                        "low": float(c3["high"]),
-                        "high": float(c1["low"]),
-                        "strength": "WEAK" if weak else "STRONG",
-                    })
+                    fvgs.append(
+                        {
+                            "index": i - 1,
+                            "type": "BEAR",
+                            "low": float(c3["high"]),
+                            "high": float(c1["low"]),
+                            "strength": "WEAK" if weak else "STRONG",
+                        }
+                    )
 
     return fvgs
