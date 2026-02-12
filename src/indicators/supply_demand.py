@@ -60,5 +60,12 @@ def detect_supply_demand(df: pd.DataFrame) -> tuple:
 
 
 def price_in_equilibrium(df: pd.DataFrame) -> bool:
-    # TODO: price near 50% HTF range
-    return False
+    if df is None or len(df) < 2:
+        return False
+
+    high = float(df["high"].max())
+    low = float(df["low"].min())
+    mid = (high + low) / 2
+    last_close = float(df.iloc[-1]["close"])
+
+    return abs(last_close - mid) / (high - low + 1e-9) < 0.1

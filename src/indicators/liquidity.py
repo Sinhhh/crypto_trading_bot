@@ -15,7 +15,8 @@ def _cluster_levels(values, indices, tolerance: float):
         v = float(val)
         placed = False
         for c in clusters:
-            if abs(v - c["level"]) <= c["level"] * tolerance:
+            threshold = max(abs(c["level"]), 1e-6) * tolerance
+            if abs(v - c["level"]) <= threshold:
                 c["indices"].append(int(idx))
                 c["min"] = min(c["min"], v)
                 c["max"] = max(c["max"], v)

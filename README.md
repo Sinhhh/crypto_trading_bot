@@ -89,18 +89,17 @@ python3 -m backtest.backtest
 Options:
 
 ```bash
-python3 -m backtest.backtest --symbols BTC,ETH --out backtest_smc_trades.csv
 python3 -m backtest.backtest --symbols BTC --log-skips
 ```
 
 Output:
 - Console logs include `TRADE | ...` lines when trades trigger.
-- A trade CSV is written to the path you pass to `--out`.
+- Backtest results are written to the log file in backtest/logs (no CSV output).
 
 Trade log format example:
 
 ```
-YYYY-MM-DD HH:MM:SS,ms | INFO | TRADE | BTC | SELL | Entry: ... | Stop: ... | Target: ... | PnL: ... | Capital: ...
+YYYY-MM-DD HH:MM:SS | INFO | TRADE | BTC | SELL | Entry: ... | Exit: ... | PnL: ... | Capital: ...
 ```
 
 ---
@@ -112,11 +111,8 @@ The paper trader:
 - runs the same `generate_signal()` strategy logic
 - simulates spot execution:
   - **BUY** may open a long
-  - **SELL** never shorts; it **closes any existing long** (close-on-sell-bias)
-- logs to:
-  - console
-  - a log file
-  - a CSV audit file
+  - **SELL** may open a short (simulated)
+- logs to console + a per-run log file
 
 Run:
 
@@ -128,22 +124,21 @@ Useful options:
 
 ```bash
 python3 -m paper.paper_trader --exchange binance --symbols BTC/USDT --poll 5 --cash 10000 --risk 0.01 \
-  --out paper/logs/paper_trades.csv --log paper/logs/paper.log
+  --log paper/logs/paper.log
 ```
 
 Console output:
 - A line is printed every loop even if no trade is taken:
 
 ```
-YYYY-MM-DD HH:MM:SS,ms | INFO | EVAL | BTC | HOLD/BUY/SELL | Entry: ... | Stop: ... | Target: ... | PnL: 0.00 | Capital: ... | Reason: ...
+YYYY-MM-DD HH:MM:SS | INFO | SKIP | BTC | bias=HOLD | setup_valid=False | entry_signal=False | reason=...
 ```
 
 - When a position opens/closes/exits, a `TRADE | ...` line is printed.
 
-Paper CSV columns (high level):
-- `event`: `EVAL`, `TRADE_OPEN`, `EXIT_STOP`, `EXIT_TARGET`, `CLOSE_ON_SELL_BIAS`, `ERROR`
-- `entry/stop/target`: numeric levels (always filled for logging)
-- `equity_usdt`: current simulated equity
+Paper log events include:
+- `event`: `TRADE`, `SKIP`, `ERROR`
+- `reason`: why the trade was skipped or how the trade exited
 
 ---
 
@@ -202,9 +197,8 @@ This project is intentionally minimal:
 
 ## Known Limitations
 
-- **Backtest** is simplistic: it computes PnL from entry→target distance (no candle-by-candle stop/target simulation, no fees/slippage).
-- **Paper broker** is simplified: market orders fill at the provided price; no partial fills, no fees, no latency.
-- **SELL in paper mode** is “close long only” (spot constraint).
+- **Backtest** simulates stop/target per 15M candle; no fees/slippage.
+- **Paper broker** is simplified: market orders fill with slippage/fees; no partial fills, no latency.
 
 ---
 

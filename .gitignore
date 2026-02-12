@@ -16,6 +16,7 @@ __pycache__/
 # Generated outputs
 reports/*.csv
 logs/
+**/logs/
 .pytest_cache/
 
 .vscode/

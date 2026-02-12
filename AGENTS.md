@@ -120,3 +120,8 @@ When generating code:
 
 ## Goal
 Generate clean, production-ready trading logic that faithfully implements this framework for BTC and ETH intraday trading.
+
+---
+
+## Repo Notes (Current)
+- Paper trading and backtests log to per-run log files; CSV outputs are not used.

@@ -1,9 +1,10 @@
 import argparse
-import csv
 import logging
 import os
 import sys
 import time
+import math
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -21,23 +22,14 @@ from paper.risk_manager import RiskConfig, RiskManager
 class PaperConfig:
     exchange_id: str = "binance"
     symbols: tuple[str, ...] = ("BTC/USDT", "ETH/USDT")
-
-    # Fixed by framework
     tf_4h: str = "4h"
     tf_1h: str = "1h"
     tf_15m: str = "15m"
-
     limit_4h: int = 120
     limit_1h: int = 240
     limit_15m: int = 240
-
     poll_seconds: int = 30
-
-    # Spot-like behavior: SELL signals close longs only
     close_on_sell_bias: bool = True
-
-    # Output
-    csv_path: str = "paper/logs/paper_trades.csv"
     log_path: str = "paper/logs/paper.log"
 
 
@@ -50,78 +42,21 @@ def _setup_logger(log_path: str) -> logging.Logger:
     logger = logging.getLogger("paper_trader")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-
-    fmt = logging.Formatter(
-        "%(asctime)s,%(msecs)03d | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    has_stream = any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
-    has_file = any(isinstance(h, logging.FileHandler) for h in logger.handlers)
-
-    if not has_stream:
-        sh = logging.StreamHandler(stream=sys.stdout)
-        sh.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    base, ext = os.path.splitext(log_path)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_log_path = f"{base}_{ts}{ext or '.log'}"
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)
         logger.addHandler(sh)
-
-    if not has_file:
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+        fh = logging.FileHandler(run_log_path, encoding="utf-8", mode="w")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
-
+        logger.info(f"Paper log file: {run_log_path}")
     return logger
 
-
-def _ensure_csv(path: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    if os.path.exists(path):
-        return
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(
-            [
-                "ts_utc",
-                "symbol",
-                "event",
-                "bias",
-                "setup_valid",
-                "entry_signal",
-                "entry",
-                "stop",
-                "target",
-                "amount",
-                "filled_price",
-                "pnl_usd",
-                "equity_usdt",
-                "reason",
-            ]
-        )
-
-
-def _append_csv(path: str, row: dict) -> None:
-    _ensure_csv(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(
-            [
-                row.get("ts_utc"),
-                row.get("symbol"),
-                row.get("event"),
-                row.get("bias"),
-                row.get("setup_valid"),
-                row.get("entry_signal"),
-                row.get("entry"),
-                row.get("stop"),
-                row.get("target"),
-                row.get("amount"),
-                row.get("filled_price"),
-                row.get("pnl_usd"),
-                row.get("equity_usdt"),
-                row.get("reason"),
-            ]
-        )
 
 
 class PaperTrader:
@@ -141,12 +76,19 @@ class PaperTrader:
 
     @staticmethod
     def _base_symbol(symbol: str) -> str:
-        # "BTC/USDT" -> "BTC"
         return str(symbol).split("/")[0].upper()
 
     @staticmethod
-    def _fmt_px(px: float | None) -> str:
-        return f"{float(px):.2f}" if isinstance(px, (int, float)) else "NA"
+    def _fmt_px(px) -> str:
+        try:
+            if px is None:
+                return "NA"
+            px_f = float(px)
+            if math.isnan(px_f) or math.isinf(px_f):
+                return "NA"
+            return f"{px_f:.2f}"
+        except Exception:
+            return "NA"
 
     def _log_line(
         self,
@@ -154,19 +96,16 @@ class PaperTrader:
         base_symbol: str,
         side: str,
         entry: float | None,
-        stop: float | None,
-        target: float | None,
         pnl: float,
         capital: float,
         reason: str | None = None,
     ) -> None:
+        exit_reason = reason or "OPEN"
         msg = (
             f"{event} | {base_symbol} | {side} | "
-            f"Entry: {self._fmt_px(entry)} | Stop: {self._fmt_px(stop)} | Target: {self._fmt_px(target)} | "
+            f"Entry: {self._fmt_px(entry)} | Exit: {exit_reason} | "
             f"PnL: {float(pnl):.2f} | Capital: {float(capital):.2f}"
         )
-        if reason:
-            msg = f"{msg} | Reason: {reason}"
         self.logger.info(msg)
 
     def _fetch_context(
@@ -177,33 +116,7 @@ class PaperTrader:
         df_15m = self.ex.fetch_ohlcv_df(symbol, self.cfg.tf_15m, self.cfg.limit_15m)
         return normalize_ohlcv(df_4h), normalize_ohlcv(df_1h), normalize_ohlcv(df_15m)
 
-    @staticmethod
-    def _levels_from_signal(
-        sig: dict, last_price: float
-    ) -> tuple[float, float, float, str | None]:
-        entry = None
-        stop = None
-        target = None
-        reason = None
-
-        entry_dict = sig.get("entry_15m") if isinstance(sig, dict) else None
-        if isinstance(entry_dict, dict):
-            entry = entry_dict.get("entry_price")
-            stop = entry_dict.get("stop")
-            target = entry_dict.get("target")
-            reason = entry_dict.get("reason")
-
-        # Logging fallbacks: always show prices
-        if entry is None:
-            entry = float(last_price)
-        if stop is None:
-            stop = float(entry)
-        if target is None:
-            target = float(entry)
-
-        return float(entry), float(stop), float(target), reason
-
-    def _csv_row(
+    def _log_event(
         self,
         symbol: str,
         event: str,
@@ -216,25 +129,25 @@ class PaperTrader:
         amount: float | None,
         filled_price: float | None,
         pnl_usd: float | None,
-        equity_usdt: float,
+        equity_usdt: float | None,
         reason: str | None,
-    ) -> dict:
-        return {
-            "ts_utc": _utc_iso(),
-            "symbol": symbol,
-            "event": event,
-            "bias": bias,
-            "setup_valid": setup_valid,
-            "entry_signal": entry_signal,
-            "entry": entry,
-            "stop": stop,
-            "target": target,
-            "amount": amount,
-            "filled_price": filled_price,
-            "pnl_usd": pnl_usd,
-            "equity_usdt": equity_usdt,
-            "reason": reason,
-        }
+    ) -> None:
+        if event == "ERROR":
+            self.logger.error(
+                "ERROR | %s | reason=%s",
+                symbol,
+                reason or "UNKNOWN_ERROR",
+            )
+            return
+
+        self.logger.info(
+            "SKIP | %s | bias=%s | setup_valid=%s | entry_signal=%s | reason=%s",
+            symbol,
+            bias,
+            setup_valid,
+            entry_signal,
+            reason or event,
+        )
 
     def step(self, symbol: str) -> None:
         last_price = self.ex.fetch_last_price(symbol)
@@ -243,61 +156,37 @@ class PaperTrader:
         self.broker.set_last_price(symbol, last_price)
 
         base_symbol = self._base_symbol(symbol)
-
-        did_trade_event = False
-
-        # Snapshot position before any broker action (broker may delete it on exit)
         pos_before = self.broker.get_position(symbol)
-
-        # Manage open position
         exit_fill = self.broker.check_stop_target(symbol)
         if exit_fill:
-            eq = self.broker.equity_usdt()
-            if pos_before:
-                self._log_line(
-                    event="TRADE",
-                    base_symbol=base_symbol,
-                    side="SELL",
-                    entry=float(pos_before.entry),
-                    stop=float(pos_before.stop),
-                    target=float(pos_before.target),
-                    pnl=float(exit_fill["pnl"]),
-                    capital=float(eq),
-                )
+            eq_after = self.broker.equity_usdt()
+            if pos_before and pos_before.side == "LONG":
+                exit_side = "SELL"
+            elif pos_before and pos_before.side == "SHORT":
+                exit_side = "BUY"
             else:
-                self._log_line(
-                    event="TRADE",
-                    base_symbol=base_symbol,
-                    side="SELL",
-                    entry=float(last_price),
-                    stop=None,
-                    target=None,
-                    pnl=float(exit_fill["pnl"]),
-                    capital=float(eq),
-                    reason=str(exit_fill.get("reason")),
-                )
-            did_trade_event = True
-            _append_csv(
-                self.cfg.csv_path,
-                {
-                    "ts_utc": _utc_iso(),
-                    "symbol": symbol,
-                    "event": f"EXIT_{exit_fill['reason']}",
-                    "bias": None,
-                    "setup_valid": None,
-                    "entry_signal": None,
-                    "entry": float(pos_before.entry) if pos_before else None,
-                    "stop": float(pos_before.stop) if pos_before else None,
-                    "target": float(pos_before.target) if pos_before else None,
-                    "amount": float(pos_before.amount) if pos_before else None,
-                    "filled_price": exit_fill["filled_price"],
-                    "pnl_usd": exit_fill["pnl"],
-                    "equity_usdt": eq,
-                    "reason": exit_fill["reason"],
-                },
-            )
+                exit_side = "EXIT"
 
-        # Compute signal
+            entry_val = float(pos_before.entry) if pos_before else None
+            stop_val = float(pos_before.stop) if pos_before else None
+            target_val = float(pos_before.target) if pos_before else None
+            amount_val = float(pos_before.amount) if pos_before else None
+
+            self._log_line(
+                event="TRADE",
+                base_symbol=base_symbol,
+                side=exit_side,
+                entry=entry_val,
+                pnl=float(exit_fill["pnl"]),
+                capital=eq_after,
+                reason=str(exit_fill.get("reason")),
+            )
+            self._log_event(
+                symbol, f"EXIT_{exit_fill['reason']}", None, None, None,
+                entry_val, stop_val, target_val, amount_val,
+                exit_fill.get("filled_price"), float(exit_fill["pnl"]),
+                eq_after, exit_fill.get("reason")
+            )
         df_4h, df_1h, df_15m = self._fetch_context(symbol)
         sig = generate_signal(df_4h, df_1h, df_15m)
 
@@ -305,276 +194,179 @@ class PaperTrader:
         setup_valid = bool(sig["setup_valid"])
         entry_signal = bool(sig["entry_signal"])
 
-        entry_px_eval, stop_eval, target_eval, reason = self._levels_from_signal(
-            sig, last_price=float(last_price)
+        entry_meta = sig.get("entry_15m") or {}
+        entry_price = (
+            entry_meta.get("entry_price")
+            or entry_meta.get("filled_price")
         )
+        stop = entry_meta.get("stop")
+        target = entry_meta.get("target")
+        entry_reason = entry_meta.get("reason")
+        equity = self.broker.equity_usdt()
 
-        # Spot-like and SELL bias: close longs only
-        if self.cfg.close_on_sell_bias and bias == "SELL":
-            pos = self.broker.get_position(symbol)
-            if pos:
-                entry_snapshot = float(pos.entry)
-                stop_snapshot = float(pos.stop)
-                target_snapshot = float(pos.target)
-                fill = self.broker.close_long(symbol, last_price, reason="SELL_BIAS")
-                eq = self.broker.equity_usdt()
+        pos_now = self.broker.get_position(symbol)
+        if self.cfg.close_on_sell_bias and pos_now and bias in ("BUY", "SELL"):
+            if pos_now.side == "LONG" and bias == "SELL":
+                fill = self.broker.close_long(symbol, float(last_price), reason="BIAS_FLIP")
+            elif pos_now.side == "SHORT" and bias == "BUY":
+                fill = self.broker.close_short(symbol, float(last_price), reason="BIAS_FLIP")
+            else:
+                fill = None
+
+            if fill and fill.get("ok"):
+                eq_after = self.broker.equity_usdt()
+                exit_side = "SELL" if pos_now.side == "LONG" else "BUY"
                 self._log_line(
                     event="TRADE",
                     base_symbol=base_symbol,
-                    side="SELL",
-                    entry=entry_snapshot,
-                    stop=stop_snapshot,
-                    target=target_snapshot,
+                    side=exit_side,
+                    entry=float(pos_now.entry),
                     pnl=float(fill["pnl"]),
-                    capital=float(eq),
+                    capital=eq_after,
+                    reason="BIAS_FLIP",
                 )
-                did_trade_event = True
-                _append_csv(
-                    self.cfg.csv_path,
-                    self._csv_row(
-                        symbol=symbol,
-                        event="CLOSE_ON_SELL_BIAS",
-                        bias=bias,
-                        setup_valid=setup_valid,
-                        entry_signal=entry_signal,
-                        entry=float(last_price),
-                        stop=None,
-                        target=None,
-                        amount=float(pos.amount),
-                        filled_price=float(fill["filled_price"]),
-                        pnl_usd=float(fill["pnl"]),
-                        equity_usdt=float(eq),
-                        reason="SELL_BIAS_CLOSE_ONLY",
-                    ),
+                self._log_event(
+                    symbol, "EXIT_BIAS_FLIP", bias, None, None,
+                    float(pos_now.entry), float(pos_now.stop), float(pos_now.target),
+                    float(pos_now.amount), fill.get("filled_price"), float(fill["pnl"]),
+                    eq_after, "BIAS_FLIP"
                 )
+                return
 
-        # Entry check
-        if bias != "BUY" or not setup_valid or not entry_signal:
-            if not did_trade_event:
-                self._log_line(
-                    event="EVAL",
-                    base_symbol=base_symbol,
-                    side=str(bias),
-                    entry=float(entry_px_eval),
-                    stop=float(stop_eval),
-                    target=float(target_eval),
-                    pnl=0.0,
-                    capital=float(self.broker.equity_usdt()),
-                    reason=reason or "NO_VALID_ENTRY",
-                )
-            _append_csv(
-                self.cfg.csv_path,
-                self._csv_row(
-                    symbol=symbol,
-                    event="EVAL",
-                    bias=bias,
-                    setup_valid=setup_valid,
-                    entry_signal=entry_signal,
-                    entry=float(entry_px_eval),
-                    stop=float(stop_eval),
-                    target=float(target_eval),
-                    amount=None,
-                    filled_price=None,
-                    pnl_usd=None,
-                    equity_usdt=float(self.broker.equity_usdt()),
-                    reason=reason or "NO_VALID_ENTRY",
-                ),
+        if bias not in ("BUY", "SELL"):
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity, "BIAS_HOLD"
             )
             return
 
-        # BUY entry execution (spot long-only)
+        if not setup_valid:
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity, "SETUP_INVALID"
+            )
+            return
+
+        if not entry_signal:
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity,
+                entry_reason or "ENTRY_SIGNAL_FALSE"
+            )
+            return
+
+        if entry_price is None or stop is None or target is None:
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity,
+                "ENTRY_LEVELS_MISSING"
+            )
+            return
+
         if self.broker.get_position(symbol):
-            if not did_trade_event:
-                self._log_line(
-                    event="EVAL",
-                    base_symbol=base_symbol,
-                    side=str(bias),
-                    entry=float(entry_px_eval),
-                    stop=float(stop_eval),
-                    target=float(target_eval),
-                    pnl=0.0,
-                    capital=float(self.broker.equity_usdt()),
-                    reason="POSITION_EXISTS",
-                )
-            _append_csv(
-                self.cfg.csv_path,
-                self._csv_row(
-                    symbol=symbol,
-                    event="EVAL",
-                    bias=bias,
-                    setup_valid=setup_valid,
-                    entry_signal=entry_signal,
-                    entry=float(entry_px_eval),
-                    stop=float(stop_eval),
-                    target=float(target_eval),
-                    amount=None,
-                    filled_price=None,
-                    pnl_usd=None,
-                    equity_usdt=float(self.broker.equity_usdt()),
-                    reason="POSITION_EXISTS",
-                ),
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity, "POSITION_EXISTS"
             )
             return
 
-        entry_price = float(sig["entry_15m"].get("entry_price", last_price))
-        stop = float(sig["entry_15m"]["stop"])
-        target = float(sig["entry_15m"]["target"])
+        entry_price = float(entry_price)
+        stop = float(stop)
+        target = float(target)
 
-        equity = self.broker.equity_usdt()
-        amount = self.risk.size_for_long(
-            equity_usdt=equity, entry=entry_price, stop=stop
-        )
+        # Compute position size
+        amount = 0.0
+        if bias == "BUY":
+            amount = self.risk.size_for_long(equity, entry_price, stop)
+        elif bias == "SELL":
+            amount = self.risk.size_for_short(equity, entry_price, stop)
+
         if amount <= 0:
-            _append_csv(
-                self.cfg.csv_path,
-                self._csv_row(
-                    symbol=symbol,
-                    event="EVAL",
-                    bias=bias,
-                    setup_valid=setup_valid,
-                    entry_signal=entry_signal,
-                    entry=float(entry_price),
-                    stop=float(stop),
-                    target=float(target),
-                    amount=0.0,
-                    filled_price=None,
-                    pnl_usd=None,
-                    equity_usdt=float(equity),
-                    reason="RISK_SIZING_ZERO",
-                ),
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, 0.0, None, None, equity, "RISK_SIZING_ZERO"
             )
             return
 
-        fill = self.broker.open_long(
-            symbol, amount=amount, price=entry_price, stop=stop, target=target
-        )
-        if not fill.get("ok"):
-            _append_csv(
-                self.cfg.csv_path,
-                self._csv_row(
-                    symbol=symbol,
-                    event="EVAL",
-                    bias=bias,
-                    setup_valid=setup_valid,
-                    entry_signal=entry_signal,
-                    entry=float(entry_price),
-                    stop=float(stop),
-                    target=float(target),
-                    amount=float(amount),
-                    filled_price=None,
-                    pnl_usd=None,
-                    equity_usdt=float(self.broker.equity_usdt()),
-                    reason=str(fill.get("reason")),
-                ),
-            )
-            return
+        # Open position
+        if bias == "BUY":
+            fill = self.broker.open_long(symbol, amount, entry_price, stop, target)
+        elif bias == "SELL":
+            fill = self.broker.open_short(symbol, amount, entry_price, stop, target)
 
-        eq_after = self.broker.equity_usdt()
-        self._log_line(
-            event="TRADE",
-            base_symbol=base_symbol,
-            side="BUY",
-            entry=float(entry_price),
-            stop=float(stop),
-            target=float(target),
-            pnl=0.0,
-            capital=float(eq_after),
-        )
-        did_trade_event = True
-        _append_csv(
-            self.cfg.csv_path,
-            self._csv_row(
-                symbol=symbol,
-                event="TRADE_OPEN",
-                bias=bias,
-                setup_valid=setup_valid,
-                entry_signal=entry_signal,
-                entry=float(entry_price),
-                stop=float(stop),
-                target=float(target),
-                amount=float(amount),
-                filled_price=float(fill["filled_price"]),
-                pnl_usd=0.0,
-                equity_usdt=float(eq_after),
-                reason=reason or "OPEN_LONG",
-            ),
-        )
+        if fill.get("ok"):
+            filled_price = (
+                fill.get("entry_price")
+                or fill.get("filled_price")
+                or entry_price
+            )
+
+            eq_after = self.broker.equity_usdt()
+            self._log_line(
+                event="TRADE",
+                base_symbol=base_symbol,
+                side=bias,
+                entry=entry_price,
+                pnl=0.0,
+                capital=eq_after,
+                reason="OPEN",
+            )
+            self._log_event(
+                symbol, "TRADE_OPEN", bias, setup_valid, entry_signal,
+                entry_price, stop, target, amount, filled_price, 0.0,
+                eq_after, None
+            )
+        else:
+            self._log_event(
+                symbol, "EVAL", bias, setup_valid, entry_signal,
+                entry_price, stop, target, amount, None, None, equity,
+                str(fill.get("reason"))
+            )
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Paper trader (SPOT only, REST feed via ccxt)"
-    )
-    p.add_argument(
-        "--exchange", type=str, default="binance", help="SPOT only (must be 'binance')"
-    )
+    p = argparse.ArgumentParser(description="Paper trader ETH/BTC Multi-Timeframe")
+    p.add_argument("--exchange", type=str, default="binance")
     p.add_argument("--symbols", type=str, default="BTC/USDT,ETH/USDT")
     p.add_argument("--poll", type=int, default=30)
     p.add_argument("--cash", type=float, default=10_000.0)
     p.add_argument("--risk", type=float, default=0.01)
-    p.add_argument("--out", type=str, default="paper/logs/paper_trades.csv")
     p.add_argument("--log", type=str, default="paper/logs/paper.log")
     return p
 
 
 def main() -> None:
     args = _build_parser().parse_args()
-
-    # Paper trader is SPOT only. Guardrail against using futures/perps exchanges.
-    exchange_id = str(args.exchange).strip().lower()
-    if exchange_id != "binance":
-        raise SystemExit("Paper trader is SPOT-only. Use: --exchange binance")
-
-    symbols = tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip())
-    allowed = {"BTC/USDT", "ETH/USDT"}
-    for s in symbols:
-        if s not in allowed:
-            raise SystemExit(f"Unsupported symbol {s}. Allowed: BTC/USDT, ETH/USDT")
-
+    symbols = tuple(s.strip().upper() for s in args.symbols.split(","))
     cfg = PaperConfig(
-        exchange_id=exchange_id,
+        exchange_id=args.exchange,
         symbols=symbols,
-        poll_seconds=int(args.poll),
-        csv_path=args.out,
+        poll_seconds=args.poll,
         log_path=args.log,
     )
-
     logger = _setup_logger(cfg.log_path)
-
     ex = CCXTExchange(cfg.exchange_id)
-    broker = BrokerSim(starting_cash_usdt=float(args.cash))
-    risk = RiskManager(RiskConfig(risk_pct=float(args.risk)))
-
-    print(
-        f"Starting paper trader | Exchange: {cfg.exchange_id} | Symbols: {cfg.symbols} | Cash: {broker.cash_usdt:.2f}\n"
+    broker = BrokerSim(starting_cash_usdt=args.cash)
+    risk = RiskManager(
+        RiskConfig(
+            risk_pct=args.risk,
+            fee_pct=broker.fee_pct,
+            slippage_pct=broker.slippage_pct,
+        )
     )
-
     trader = PaperTrader(cfg, ex, broker, risk, logger)
 
+    print(f"=== Starting paper trader | Symbols: {cfg.symbols} | Cash: {broker.cash_usdt:.2f}\n")
     while True:
         for sym in cfg.symbols:
             try:
                 trader.step(sym)
             except Exception as e:
                 logger.exception(f"ERROR | {sym} | {e}")
-                _append_csv(
-                    cfg.csv_path,
-                    {
-                        "ts_utc": _utc_iso(),
-                        "symbol": sym,
-                        "event": "ERROR",
-                        "bias": None,
-                        "setup_valid": None,
-                        "entry_signal": None,
-                        "entry": None,
-                        "stop": None,
-                        "target": None,
-                        "amount": None,
-                        "filled_price": None,
-                        "pnl_usd": None,
-                        "equity_usdt": broker.equity_usdt(),
-                        "reason": str(e),
-                    },
+                trader._log_event(
+                    sym, "ERROR", None, None, None,
+                    None, None, None, None, None, None,
+                    broker.equity_usdt(), str(e)
                 )
         time.sleep(cfg.poll_seconds)
 

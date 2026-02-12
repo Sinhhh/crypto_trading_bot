@@ -1,9 +1,8 @@
 import pandas as pd
 
 from src.indicators.structure import detect_market_structure, detect_bos_choch
-
 from src.indicators.order_blocks import identify_order_blocks
-from src.indicators.fvg import fair_value_gap
+from src.indicators.fvg import fair_value_gap_ict
 from src.indicators.liquidity import detect_liquidity_grab, detect_liquidity_zones
 from src.indicators.supply_demand import detect_supply_demand
 
@@ -213,7 +212,7 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
 
     # Order Blocks & FVG
     ob_list = identify_order_blocks(df_1h)
-    fvg_list = fair_value_gap(df_1h)
+    fvg_list = fair_value_gap_ict(df_1h)
 
     last_candle = df_1h.iloc[-1]
     in_zone = False
@@ -410,7 +409,7 @@ def generate_signal(df_4h, df_1h, df_15m) -> dict:
 
     # Combine OB/FVG from 1H for 15M entry
     ob_1h = identify_order_blocks(df_1h)
-    fvg_1h = fair_value_gap(df_1h)
+    fvg_1h = fair_value_gap_ict(df_1h)
     ob_fvg_15m = ob_1h + fvg_1h
 
     entry_15m = get_15m_entry(df_15m, bias, setup_1h["setup_valid"], ob_fvg_15m)
