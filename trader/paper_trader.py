@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from strategies.multi_timeframe import generate_signal
+from strategies.smc_signal import generate_signal
 from utils.data_loader import normalize_ohlcv
 
 from exchange.ccxt_exchange import CCXTExchange
@@ -31,10 +31,6 @@ class PaperConfig:
     poll_seconds: int = 30
     close_on_sell_bias: bool = True
     log_path: str = "logs/paper.log"
-
-
-def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _setup_logger(log_path: str) -> logging.Logger:

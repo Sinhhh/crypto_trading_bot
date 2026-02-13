@@ -1,21 +1,29 @@
+"""Higher timeframe supply & demand zone detection.
+
+This module identifies simple supply and demand zones from swing highs/lows.
+
+Intended use in the framework:
+- 4H: context only (zones + directional bias guardrails).
+"""
+
 import pandas as pd
 
 
 def detect_supply_demand(df: pd.DataFrame) -> tuple:
-    """
-    Detect higher-timeframe Supply & Demand zones from swing highs/lows.
+    """Detect basic supply and demand zones from local swing points.
 
-    Simple SMC-inspired rules:
-    - Demand zone: a swing low area where price may react upward.
-    - Supply zone: a swing high area where price may react downward.
-    - Keep only the 2 most recent zones for simplicity.
+    Zones are extracted from simple swing highs and swing lows:
+    - Supply zone: candle body low to candle high at a swing high.
+    - Demand zone: candle low to candle body high at a swing low.
+
+    For simplicity, only the two most recent zones of each type are kept.
 
     Args:
-        df: OHLC DataFrame sorted in ascending time order.
+        df: OHLCV DataFrame sorted in ascending time order.
 
     Returns:
-        supply_zones: list[dict]  # each: {'index': int, 'low': float, 'high': float}
-        demand_zones: list[dict]  # each: {'index': int, 'low': float, 'high': float}
+        Tuple `(supply_zones, demand_zones)` where each is a list of dicts:
+        `{index: int, low: float, high: float}`.
     """
     supply_zones: list[dict] = []
     demand_zones: list[dict] = []
@@ -57,15 +65,3 @@ def detect_supply_demand(df: pd.DataFrame) -> tuple:
         demand_zones = demand_zones[-2:]
 
     return supply_zones, demand_zones
-
-
-def price_in_equilibrium(df: pd.DataFrame) -> bool:
-    if df is None or len(df) < 2:
-        return False
-
-    high = float(df["high"].max())
-    low = float(df["low"].min())
-    mid = (high + low) / 2
-    last_close = float(df.iloc[-1]["close"])
-
-    return abs(last_close - mid) / (high - low + 1e-9) < 0.1

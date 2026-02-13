@@ -1,32 +1,101 @@
-"""
-Liquidity detection
+"""Liquidity detection utilities.
+
+This module provides deterministic liquidity utilities used by the framework.
+
+Intended use in the framework:
+- 1H: detect equal-highs/equal-lows liquidity pools.
+- 15M: validate a sweep + reclaim (liquidity grab) aligned with bias.
 """
 
 import pandas as pd
 
+from utils.math import (
+    _cluster_levels,
+    _most_recent_swing_high,
+    _most_recent_swing_low,
+)
 
-def _cluster_levels(values, indices, tolerance: float):
-    """Group values into tolerance-based clusters.
 
-    Returns list of dicts: {"level": float, "indices": list[int], "min": float, "max": float}
+def detect_liquidity_grab_v2(
+    df: pd.DataFrame,
+    bias: str,
+    lookback: int = 20,
+    sweep_window: int = 5,
+    max_window: int | None = 120,
+):
+    """Detect a sweep + reclaim liquidity grab pattern.
+
+    For BUY bias:
+    - Find a sweep candle in the recent window whose low breaks a prior swing
+      low / prior min low (liquidity sweep), then require current close to be
+      back above the swept reference (reclaim).
+
+    For SELL bias:
+    - Symmetric logic for highs.
+
+    Args:
+        df: OHLCV DataFrame in chronological order.
+        bias: Trade direction context. Expected values: `BUY` or `SELL`.
+        lookback: Number of prior candles to define the reference liquidity.
+        sweep_window: How many candles (excluding the current candle) are
+            searched for a sweep.
+        max_window: If set, only the most recent `max_window` candles are used.
+
+    Returns:
+        Tuple of:
+        - grabbed (bool): True when a sweep + reclaim is detected.
+        - sweep_index (int | None): Position (0-based) in the (possibly sliced)
+          df where the sweep candle occurred.
+        - ref_level (float | None): Liquidity reference price that was swept.
     """
-    clusters: list[dict] = []
-    for idx, val in zip(indices, values):
-        v = float(val)
-        placed = False
-        for c in clusters:
-            threshold = max(abs(c["level"]), 1e-6) * tolerance
-            if abs(v - c["level"]) <= threshold:
-                c["indices"].append(int(idx))
-                c["min"] = min(c["min"], v)
-                c["max"] = max(c["max"], v)
-                # Keep level as simple mean of bounds for stability
-                c["level"] = (c["min"] + c["max"]) / 2.0
-                placed = True
-                break
-        if not placed:
-            clusters.append({"level": v, "indices": [int(idx)], "min": v, "max": v})
-    return clusters
+
+    if max_window is not None and max_window > 0 and len(df) > max_window:
+        df = df.tail(max_window).copy()
+
+    if len(df) < 5:
+        return False, None, None
+
+    lookback = max(3, lookback)
+    sweep_window = max(1, sweep_window)
+
+    if len(df) < (lookback + sweep_window + 1):
+        lookback = max(3, min(lookback, len(df) - 2))
+        sweep_window = max(1, min(sweep_window, len(df) - 2))
+
+    current = df.iloc[-1]
+
+    start_pos = max(1, len(df) - (sweep_window + 1))
+    end_pos = len(df) - 1  # exclude current candle
+
+    for sweep_pos in range(start_pos, end_pos):
+        sweep_candle = df.iloc[sweep_pos]
+        prior = df.iloc[max(0, sweep_pos - lookback) : sweep_pos]
+        if prior.empty:
+            continue
+
+        if bias == "BUY":
+            prior_lows = prior["low"].values
+            swing_low = _most_recent_swing_low(prior_lows)
+            ref = float(swing_low if swing_low is not None else prior["low"].min())
+
+            swept = float(sweep_candle["low"]) < ref
+            reclaimed = float(current["close"]) > ref
+
+            if swept and reclaimed:
+                return True, sweep_pos, ref
+
+        if bias == "SELL":
+            prior_highs = prior["high"].values
+            swing_high = _most_recent_swing_high(prior_highs)
+            ref = float(swing_high if swing_high is not None else prior["high"].max())
+
+            swept = float(sweep_candle["high"]) > ref
+            reclaimed = float(current["close"]) < ref
+
+            if swept and reclaimed:
+                return True, sweep_pos, ref
+
+    return False, None, None
 
 
 def detect_liquidity_zones(
@@ -35,13 +104,23 @@ def detect_liquidity_zones(
     min_touches: int = 2,
     tolerance: float = 0.0015,
 ) -> dict:
-    """Detect simple equal-highs/equal-lows liquidity zones on 1H.
+    """Detect simple equal-highs/equal-lows liquidity pools.
+
+    Liquidity pools are approximated by clustering recent highs and lows within
+    a relative tolerance.
+
+    Args:
+        df: OHLCV DataFrame in chronological order.
+        lookback: Number of candles used to find clusters.
+        min_touches: Minimum number of touches (cluster members) to consider a
+            cluster a liquidity zone.
+        tolerance: Relative tolerance for clustering (e.g. 0.0015 = 0.15%).
 
     Returns:
-        {
-            "equal_highs": list[dict],
-            "equal_lows": list[dict],
-        }
+        Dict with keys:
+        - `equal_highs`: list of clusters near equal highs.
+        - `equal_lows`: list of clusters near equal lows.
+        Each cluster is a dict: `{level, indices, min, max}`.
     """
     if df is None or df.empty:
         return {"equal_highs": [], "equal_lows": []}
@@ -61,87 +140,3 @@ def detect_liquidity_zones(
     equal_lows = [c for c in low_clusters if len(c["indices"]) >= min_touches]
 
     return {"equal_highs": equal_highs, "equal_lows": equal_lows}
-
-
-def _most_recent_swing_low(lows) -> float | None:
-    """Return the most recent local swing low value from a 1D array-like."""
-    if len(lows) < 3:
-        return None
-    for i in range(len(lows) - 2, 0, -1):
-        if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
-            return float(lows[i])
-    return None
-
-
-def _most_recent_swing_high(highs) -> float | None:
-    """Return the most recent local swing high value from a 1D array-like."""
-    if len(highs) < 3:
-        return None
-    for i in range(len(highs) - 2, 0, -1):
-        if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
-            return float(highs[i])
-    return None
-
-
-def detect_liquidity_grab(
-    df: pd.DataFrame,
-    bias: str,
-    lookback: int = 20,
-    sweep_window: int = 5,
-    max_window: int | None = 120,
-) -> bool:
-    """
-    Detect a simple liquidity grab (stop-hunt sweep) followed by a reclaim.
-    - BUY bias: sweep prior lows, then reclaim above the swept reference.
-    - SELL bias: sweep prior highs, then reclaim below the swept reference.
-    """
-    if max_window is not None and max_window > 0 and len(df) > max_window:
-        # Keep the most recent candles only; older data is irrelevant for an intraday sweep+reclaim.
-        df = df.tail(max_window)
-
-    if len(df) < 5:
-        return False
-
-    if lookback < 3:
-        lookback = 3
-
-    if sweep_window < 1:
-        sweep_window = 1
-
-    if len(df) < (lookback + sweep_window + 1):
-        # still attempt with what we have
-        lookback = max(3, min(lookback, len(df) - 2))
-        sweep_window = max(1, min(sweep_window, len(df) - 2))
-
-    current = df.iloc[-1]
-
-    # For each candidate sweep candle in the last `sweep_window` candles before `current`,
-    # compare to the prior `lookback` candles.
-    start_pos = max(1, len(df) - (sweep_window + 1))
-    end_pos = len(df) - 1  # exclude current candle
-    for sweep_pos in range(start_pos, end_pos):
-        sweep_candle = df.iloc[sweep_pos]
-        prior_start = max(0, sweep_pos - lookback)
-        prior = df.iloc[prior_start:sweep_pos]
-        if prior.empty:
-            continue
-
-        if bias == "BUY":
-            prior_lows = prior["low"].values
-            swing_low = _most_recent_swing_low(prior_lows)
-            ref = swing_low if swing_low is not None else float(prior["low"].min())
-            swept = float(sweep_candle["low"]) < ref
-            reclaimed = float(current["close"]) > ref
-            if swept and reclaimed:
-                return True
-
-        if bias == "SELL":
-            prior_highs = prior["high"].values
-            swing_high = _most_recent_swing_high(prior_highs)
-            ref = swing_high if swing_high is not None else float(prior["high"].max())
-            swept = float(sweep_candle["high"]) > ref
-            reclaimed = float(current["close"]) < ref
-            if swept and reclaimed:
-                return True
-
-    return False

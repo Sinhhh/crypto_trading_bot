@@ -11,7 +11,7 @@ Folder structure:
 import pandas as pd
 
 from utils.data_loader import load_csv_data
-from strategies.multi_timeframe import generate_signal
+from strategies.smc_signal import generate_signal
 
 
 # ===========================

@@ -1,12 +1,4 @@
-from dataclasses import dataclass
-
 import pandas as pd
-
-
-@dataclass(frozen=True)
-class MarketInfo:
-    amount_precision: int | None
-    min_amount: float | None
 
 
 class CCXTExchange:
@@ -51,27 +43,6 @@ class CCXTExchange:
             return
         self.exchange.load_markets()
         self._markets_loaded = True
-
-    def market_info(self, symbol: str) -> MarketInfo:
-        self.load_markets()
-        m = self.exchange.markets.get(symbol) or {}
-        prec = None
-        min_amt = None
-        precision = m.get("precision") or {}
-        if "amount" in precision and precision["amount"] is not None:
-            prec = int(precision["amount"])
-        limits = m.get("limits") or {}
-        amount_limits = limits.get("amount") or {}
-        if amount_limits.get("min") is not None:
-            min_amt = float(amount_limits["min"])
-        return MarketInfo(amount_precision=prec, min_amount=min_amt)
-
-    def round_amount(self, symbol: str, amount: float) -> float:
-        info = self.market_info(symbol)
-        if info.amount_precision is None:
-            return float(amount)
-        fmt = "{:.%df}" % info.amount_precision
-        return float(fmt.format(amount))
 
     def fetch_ohlcv_df(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
         self.load_markets()

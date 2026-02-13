@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 
 @dataclass
@@ -10,7 +9,6 @@ class SimPosition:
     entry: float
     stop: float
     target: float
-    opened_at: str
     margin: float = 0.0
 
 
@@ -84,7 +82,6 @@ class BrokerSim:
             entry=px_effective,
             stop=float(stop),
             target=float(target),
-            opened_at=datetime.now(timezone.utc).isoformat(),
         )
         return {
             "ok": True,
@@ -144,7 +141,6 @@ class BrokerSim:
             entry=px_effective,
             stop=float(stop),
             target=float(target),
-            opened_at=datetime.now(timezone.utc).isoformat(),
             margin=float(margin),
         )
         return {

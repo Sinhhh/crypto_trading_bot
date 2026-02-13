@@ -1,91 +1,41 @@
 import pandas as pd
 
-from indicators.structure import detect_bos_choch_clean, detect_market_structure
-from indicators.order_blocks import (
-    filter_fresh_order_blocks,
-    identify_order_blocks_clean,
+from indicators.structure import (
+    detect_market_structure,
+    detect_bos_choch_v2,
+    detect_bos_index,
 )
-from indicators.fvg import fair_value_gap_ict, identify_fvg_clean
-from indicators.liquidity import detect_liquidity_grab, detect_liquidity_zones
+
+from indicators.order_blocks import (
+    identify_order_blocks_clean,
+    filter_fresh_order_blocks,
+)
+from indicators.fvg import identify_fvg_clean
+from indicators.liquidity import detect_liquidity_grab_v2, detect_liquidity_zones
 from indicators.supply_demand import detect_supply_demand
 
 from utils.candle_utils import (
     is_bullish_engulfing,
     is_bearish_engulfing,
+    is_first_tap_zone,
     is_hammer,
     is_bearish_pinbar,
     is_inside_bar,
+    is_sweep_htf_liquidity,
+)
+from utils.helpers import (
+    _compute_entry_levels,
+    _recent_window,
+    _candle_overlaps_zone,
+    parse_zone,
 )
 
-
-# ---------------------------
-# Risk/management parameters
-# ---------------------------
-RR_MULT = 2.0
-USE_ATR_STOP = True
-ATR_PERIOD = 20
-ATR_MULT = 1.0
 
 # Liquidity zone parameters (1H)
 LIQ_LOOKBACK_1H = 60
 LIQ_MIN_TOUCHES = 1
 LIQ_TOLERANCE = 0.0030
 LIQ_PROXIMITY = 0.0040
-
-
-def _recent_window(df: pd.DataFrame, max_window: int = 120) -> pd.DataFrame:
-    return df.tail(max_window) if df is not None and len(df) > max_window else df
-
-
-def _compute_entry_levels(df_15m: pd.DataFrame, bias: str):
-    if df_15m is None or len(df_15m) < 1:
-        return None, None, None
-    recent = df_15m.iloc[-1]
-    entry = float(recent["close"])
-    stop = float(recent["low"] if bias == "BUY" else recent["high"])
-    df_recent = _recent_window(df_15m)
-    if USE_ATR_STOP:
-        atr_value = _atr(df_recent, ATR_PERIOD)
-        if atr_value is not None:
-            dist = ATR_MULT * atr_value
-            stop = min(stop, entry - dist) if bias == "BUY" else max(stop, entry + dist)
-    risk = abs(entry - stop)
-    target = entry + RR_MULT * risk if bias == "BUY" else entry - RR_MULT * risk
-    return entry, stop, target
-
-
-def _atr(df: pd.DataFrame, period: int) -> float | None:
-    if df is None or len(df) < (period + 1):
-        return None
-    high, low, close = df["high"], df["low"], df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.rolling(period, min_periods=period).mean()
-    last = atr.iloc[-1]
-    return float(last) if pd.notna(last) and last > 0 else None
-
-
-def _candle_overlaps_zone(candle, zone_low: float, zone_high: float) -> bool:
-    return candle["low"] <= zone_high and candle["high"] >= zone_low
-
-
-def parse_zone(zone):
-    if isinstance(zone, dict):
-        typ = zone.get("type") or zone.get("direction")
-        low = zone.get("low") or zone.get("start") or zone.get("min")
-        high = zone.get("high") or zone.get("end") or zone.get("max")
-        if low is None or high is None:
-            raise ValueError(zone)
-        return float(min(low, high)), float(max(low, high)), typ
-    if isinstance(zone, (list, tuple)):
-        if len(zone) >= 4 and isinstance(zone[1], str) and zone[1] in ("BULL", "BEAR"):
-            return float(min(zone[3], zone[2])), float(max(zone[3], zone[2])), zone[1]
-        if len(zone) >= 3 and isinstance(zone[2], str) and zone[2] in ("BULL", "BEAR"):
-            return float(min(zone[0], zone[1])), float(max(zone[0], zone[1])), zone[2]
-    raise ValueError(zone)
 
 
 # ---------------------------
@@ -147,7 +97,15 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     # Market structure + break
     # -------------------------
     structure = detect_market_structure(df_1h)
-    bos, choch, break_dir = detect_bos_choch_clean(df_1h, structure)
+    bos, choch, break_dir = detect_bos_choch_v2(df_1h, structure)
+
+    FRESH_BOS_WINDOW = 8  # 8 cây 1H gần nhất (~8 giờ)
+    if bos:
+        last_bos_idx = detect_bos_index(df_1h, structure)
+        if last_bos_idx is None or last_bos_idx < len(df_1h) - FRESH_BOS_WINDOW:
+            bos = False
+            choch = False
+            break_dir = None
 
     result.update(
         {"structure": structure, "BOS": bos, "CHOCH": choch, "break_dir": break_dir}
@@ -206,7 +164,7 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     result["zones"] = zones
 
     # -------------------------
-    # Liquidity context
+    # Liquidity zone
     # -------------------------
     liq = detect_liquidity_zones(
         df_1h,
@@ -214,6 +172,24 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
         min_touches=LIQ_MIN_TOUCHES,
         tolerance=LIQ_TOLERANCE,
     )
+
+    # HTF liquidity levels (for LTF sweep validation)
+    htf_liquidity = []
+    for z in liq.get("equal_lows", []):
+        htf_liquidity.append(
+            {
+                "type": "BUY",
+                "price": float(z["level"]),
+            }
+        )
+
+    for z in liq.get("equal_highs", []):
+        htf_liquidity.append(
+            {
+                "type": "SELL",
+                "price": float(z["level"]),
+            }
+        )
 
     last_close = float(df_1h.iloc[-1]["close"])
 
@@ -235,6 +211,8 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     if result["liquidity_zone_ok"]:
         result["setup_valid"] = True
 
+    result["htf_liquidity"] = htf_liquidity
+
     return result
 
 
@@ -245,15 +223,20 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
 # 15M ENTRY (cleaned)
 # ---------------------------
 def get_15m_entry(
-    df_15m: pd.DataFrame, bias: str, setup_valid: bool, ob_fvg_list: list
+    df_15m: pd.DataFrame,
+    bias: str,
+    setup_valid: bool,
+    ob_fvg_list: list,
+    htf_liquidity: list,
 ) -> dict:
     """
-    Compute 15M entry signals based on 1H zones (OB/FVG):
-    - Requires 1H setup to be valid
-    - Candle must touch a valid OB/FVG
-    - Validate liquidity grab
-    - Respect inside-bar breakout rules
-    - Confirm bullish/bearish candle patterns
+    Compute 15M entry signals based on SMC v2.1:
+    - HTF setup validation
+    - Liquidity grab (sweep + reclaim)
+    - Entry must occur AFTER sweep (freshness enforced)
+    - Price must react at HTF OB/FVG
+    - Inside-bar compression handling
+    - 15M confirmation / displacement
     """
     result = {
         "entry_signal": False,
@@ -262,7 +245,7 @@ def get_15m_entry(
         "target": None,
         "reason": "",
     }
-
+    # HTF validation
     if not setup_valid:
         result["reason"] = "SETUP_INVALID"
         return result
@@ -276,36 +259,100 @@ def get_15m_entry(
     prev2 = df_15m.iloc[-3]
 
     # -------------------------
-    # Liquidity grab check
+    # Liquidity grab check (Liquidity sweep)
     # -------------------------
     df_recent = _recent_window(df_15m, max_window=120)
-    if not detect_liquidity_grab(df_recent, bias=bias):
-        result["reason"] = "LIQUIDITY_FAIL"
+    grabbed, sweep_idx, ref = detect_liquidity_grab_v2(
+        df_recent,
+        bias=bias,
+        lookback=20,
+        sweep_window=5,
+        max_window=120,
+    )
+
+    if not grabbed:
+        result["reason"] = "NO_LIQUIDITY_SWEEP"
+        return result
+
+    entry_idx = len(df_recent) - 1
+    if entry_idx <= sweep_idx:
+        result["reason"] = "ENTRY_BEFORE_SWEEP"
+        return result
+
+    # Validate sweep is HTF liquidity (BUG #1 FIX)
+    if not is_sweep_htf_liquidity(
+        sweep_price=ref,
+        bias=bias,
+        htf_liquidity=htf_liquidity,  # lấy từ 1H setup
+    ):
+        result["reason"] = "SWEEP_NOT_HTF_LIQUIDITY"
+        return result
+
+    # Sweep freshness (anti-late entry)
+    MAX_SWEEP_DISTANCE = 6  # 6 x 15m = 90 minutes
+    if entry_idx - sweep_idx > MAX_SWEEP_DISTANCE:
+        result["reason"] = "SWEEP_TOO_OLD"
+        return result
+
+    # Reclaim validation
+    if bias == "BUY" and recent["close"] <= ref:
+        result["reason"] = "NO_RECLAIM_CONFIRM"
+        return result
+
+    if bias == "SELL" and recent["close"] >= ref:
+        result["reason"] = "NO_RECLAIM_CONFIRM"
         return result
 
     # -------------------------
-    # Candle overlaps 1H OB/FVG
+    # Price returns to HTF OB / FVG (FIRST TAP ONLY)
     # -------------------------
     in_zone = False
+    zone_first_tap = False
+    current_idx = len(df_15m) - 1
+
     for zone in ob_fvg_list:
         low, high, typ = parse_zone(zone)
-        if bias == "BUY" and typ == "BULL" and _candle_overlaps_zone(recent, low, high):
+
+        if bias == "BUY" and typ != "BULL":
+            continue
+        if bias == "SELL" and typ != "BEAR":
+            continue
+
+        if _candle_overlaps_zone(recent, low, high):
             in_zone = True
-            break
-        if (
-            bias == "SELL"
-            and typ == "BEAR"
-            and _candle_overlaps_zone(recent, low, high)
-        ):
-            in_zone = True
-            break
+
+            if is_first_tap_zone(
+                df_15m,
+                zone_low=low,
+                zone_high=high,
+                current_idx=current_idx,
+                lookback=50,
+            ):
+                zone_first_tap = True
+                break  # ✅ first valid zone found
+            else:
+                # touched but NOT first tap → reject this zone
+                continue
 
     if not in_zone:
         result["reason"] = "CANDLE_NOT_IN_OB_FVG"
         return result
 
+    if not zone_first_tap:
+        result["reason"] = "NOT_FIRST_TAP_ZONE"
+        return result
+
+    # OB reaction (zone must HOLD price)
+    if bias == "BUY" and recent["close"] < recent["open"]:
+        result["reason"] = "NO_OB_REJECTION"
+        return result
+
+    if bias == "SELL" and recent["close"] > recent["open"]:
+        result["reason"] = "NO_OB_REJECTION"
+        return result
+
     # -------------------------
-    # Inside-bar breakout
+    # Inside-bar logic (compression)
     # -------------------------
     if is_inside_bar(prev, recent):
         result["reason"] = "WAIT_INSIDE_BAR_BREAKOUT"
@@ -323,7 +370,7 @@ def get_15m_entry(
             )
 
     # -------------------------
-    # 15M confirmation patterns
+    # 5M confirmation / displacement
     # -------------------------
     bullish_ok = (
         is_bullish_engulfing(prev, recent)
@@ -371,7 +418,13 @@ def generate_signal(df_4h, df_1h, df_15m) -> dict:
     setup_1h = get_1h_setup(df_1h, bias)
 
     zones_1h = setup_1h.get("zones", [])
-    entry_15m = get_15m_entry(df_15m, bias, setup_1h["setup_valid"], zones_1h)
+    entry_15m = get_15m_entry(
+        df_15m,
+        bias,
+        setup_1h["setup_valid"],
+        zones_1h,
+        setup_1h.get("htf_liquidity", []),
+    )
 
     return {
         "bias_4h": bias,

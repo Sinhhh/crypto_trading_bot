@@ -1,118 +1,19 @@
-"""
-Fair Value Gap detection (3-candle logic)
+"""Fair Value Gap (FVG) detection.
+
+This module implements deterministic, price-action-based Fair Value Gap detection
+using a 3-candle pattern plus a displacement check.
+
+Intended use in the framework:
+- 1H: identify institutional footprint (FVG zones) for setup validation.
+
+Notes:
+- No indicators such as RSI/EMA are used.
 """
 
 import pandas as pd
 
 from indicators.order_blocks import is_directional_displacement
-
-
-def fair_value_gap_ict(
-    df: pd.DataFrame,
-    min_body_ratio: float = 0.5,
-    min_gap_ratio: float = 0.1,
-):
-    """
-    ICT-style Fair Value Gap detection with displacement validation.
-
-    Args:
-        min_body_ratio: body / range của displacement candle (>= 0.5 là mạnh)
-        min_gap_ratio: gap tối thiểu so với range của displacement candle
-
-    Returns:
-        list[dict]: {
-            'type': 'BULL' | 'BEAR',
-            'low': float,
-            'high': float,
-            'index': int,
-            'strength': float
-        }
-    """
-    fvg_list = []
-
-    if df is None or len(df) < 3:
-        return fvg_list
-
-    for i in range(2, len(df)):
-        c1 = df.iloc[i - 2]  # candle trước
-        c2 = df.iloc[i - 1]  # displacement candle
-        c3 = df.iloc[i]  # candle sau
-
-        # Displacement candle stats
-        body = abs(c2["close"] - c2["open"])
-        range_ = c2["high"] - c2["low"]
-
-        if range_ <= 0:
-            continue
-
-        body_ratio = body / range_
-
-        # ❌ Không có displacement → bỏ
-        if body_ratio < min_body_ratio:
-            continue
-
-        # -----------------------
-        # 🟢 Bullish FVG
-        # -----------------------
-        if c3["low"] > c1["high"]:
-            gap = c3["low"] - c1["high"]
-
-            # Gap quá nhỏ → nhiễu
-            if gap / range_ < min_gap_ratio:
-                continue
-
-            fvg_list.append(
-                {
-                    "type": "BULL",
-                    "low": float(c1["high"]),
-                    "high": float(c3["low"]),
-                    "index": i,
-                    "strength": round(body_ratio, 2),
-                }
-            )
-
-        # -----------------------
-        # 🔴 Bearish FVG
-        # -----------------------
-        if c3["high"] < c1["low"]:
-            gap = c1["low"] - c3["high"]
-
-            if gap / range_ < min_gap_ratio:
-                continue
-
-            fvg_list.append(
-                {
-                    "type": "BEAR",
-                    "low": float(c3["high"]),
-                    "high": float(c1["low"]),
-                    "index": i,
-                    "strength": round(body_ratio, 2),
-                }
-            )
-
-    return fvg_list
-
-
-def in_equilibrium(
-    df: pd.DataFrame,
-    idx: int,
-    lookback: int = 20,
-    tolerance: float = 0.15,
-) -> bool:
-    start = max(0, idx - lookback)
-    segment = df.iloc[start : idx + 1]
-
-    hi = segment["high"].max()
-    lo = segment["low"].min()
-    eq = (hi + lo) / 2
-
-    price = df.iloc[idx]["close"]
-    range_ = hi - lo
-
-    if range_ == 0:
-        return True
-
-    return abs(price - eq) / range_ <= tolerance
+from utils.math import in_equilibrium
 
 
 def identify_fvg_clean(
@@ -121,18 +22,27 @@ def identify_fvg_clean(
     min_gap_ratio: float = 0.0003,
     equilibrium_filter: bool = True,
 ):
-    """
-    ICT-style Fair Value Gap detection.
+    """Identify ICT-style Fair Value Gaps using a 3-candle pattern.
+
+    A bullish FVG is detected when the third candle's low is above the first
+    candle's high, and the middle candle is a bullish displacement candle.
+    A bearish FVG is the inverse.
+
+    Args:
+        df: OHLCV data in chronological order. Requires columns: `open`, `high`,
+            `low`, `close`.
+        min_body_ratio: Minimum displacement candle body-to-range ratio.
+        min_gap_ratio: Minimum gap size normalized by the middle candle close.
+        equilibrium_filter: If True, labels FVGs as WEAK when the displacement
+            candle occurs near equilibrium (see `utils.helpers.in_equilibrium`).
 
     Returns:
-        list of dicts:
-        {
-            'index': int,              # displacement candle index
-            'type': 'BULL' | 'BEAR',
-            'low': float,
-            'high': float,
-            'strength': 'STRONG' | 'WEAK'
-        }
+        A list of FVG dicts with keys:
+        - `index` (int): index of the displacement candle (middle candle).
+        - `type` (str): `BULL` or `BEAR`.
+        - `low` (float): lower bound of the gap.
+        - `high` (float): upper bound of the gap.
+        - `strength` (str): `STRONG` or `WEAK`.
     """
     fvgs = []
 

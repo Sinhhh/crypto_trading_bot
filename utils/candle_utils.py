@@ -3,6 +3,10 @@ Candle utilities for 15M entry confirmation.
 Pure price action – no indicators.
 """
 
+import pandas as pd
+
+from utils.helpers import _candle_overlaps_zone
+
 
 def is_bullish_engulfing(prev, current):
     return (
@@ -42,3 +46,89 @@ def is_bearish_pinbar(candle):
 
 def is_inside_bar(prev, current):
     return current["high"] <= prev["high"] and current["low"] >= prev["low"]
+
+
+def is_first_tap_zone(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    current_idx: int,
+    lookback: int = 50,
+) -> bool:
+    """
+    Returns True if the current candle is the FIRST time price taps this zone.
+    """
+    start = max(0, current_idx - lookback)
+    for i in range(start, current_idx):
+        candle = df.iloc[i]
+        if _candle_overlaps_zone(candle, zone_low, zone_high):
+            return False
+    return True
+
+
+def is_sweep_htf_liquidity(
+    sweep_price: float,
+    bias: str,
+    htf_liquidity: list,
+    tolerance: float = 0.0003,  # tùy instrument
+) -> bool:
+    """
+    Validate that a 15M liquidity sweep actually swept HTF (1H) liquidity.
+    """
+    for liq in htf_liquidity:
+        if bias == "BUY" and liq["type"] == "SELL":
+            # price swept below HTF sell-side liquidity
+            if sweep_price <= liq["price"] + tolerance:
+                return True
+
+        if bias == "SELL" and liq["type"] == "BUY":
+            # price swept above HTF buy-side liquidity
+            if sweep_price >= liq["price"] - tolerance:
+                return True
+
+    return False
+
+
+def is_displacement(candle, min_body_ratio=0.6):
+    body = abs(candle["close"] - candle["open"])
+    range_ = candle["high"] - candle["low"]
+    if range_ <= 0:
+        return False
+    return (body / range_) >= min_body_ratio
+
+
+def is_directional_displacement(
+    candle, direction: str, min_body_ratio: float = 0.6
+) -> bool:
+    if not is_displacement(candle, min_body_ratio):
+        return False
+
+    if direction == "BULL":
+        return candle["close"] > candle["open"]
+    if direction == "BEAR":
+        return candle["close"] < candle["open"]
+
+    return False
+
+
+def caused_directional_impulse(
+    df: pd.DataFrame,
+    idx: int,
+    direction: str,
+    lookahead: int = 3,
+    min_body_ratio: float = 0.6,
+) -> bool:
+    base = df.iloc[idx]
+
+    for j in range(idx + 1, min(idx + 1 + lookahead, len(df))):
+        c = df.iloc[j]
+
+        if not is_displacement(c, min_body_ratio):
+            continue
+
+        if direction == "BULL" and c["close"] > base["high"]:
+            return True
+        if direction == "BEAR" and c["close"] < base["low"]:
+            return True
+
+    return False
