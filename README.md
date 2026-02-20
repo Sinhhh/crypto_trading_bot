@@ -1,234 +1,222 @@
-# Crypto Intraday Bot (BTC & ETH) — Multi‑Timeframe SMC Framework
+# Crypto Intraday Bot (BTC & ETH)
 
-A deterministic, rule-based intraday trading system for **BTC** and **ETH** that follows the framework in [AGENTS.md](AGENTS.md):
+## Multi-Timeframe SMC Framework — Deterministic & Rule-Based
+
+A deterministic intraday trading system for BTC and ETH built on a strict Smart Money Concepts (SMC) top-down workflow.
+
+This system follows the framework defined in [AGENTS.md](AGENTS.md):
 
 - **4H**: market context → outputs **BUY / SELL / HOLD** bias only
 - **1H**: setup validation → institutional footprint (BOS/CHOCH) + location (OB/FVG)
 - **15M**: entry confirmation → liquidity sweep + candle confirmation + stop/target
 
-This repo includes:
-- A **CSV backtester** over provided OHLCV data
-- A **paper trader** (spot-only) that pulls candles from Binance via `ccxt`, simulates fills, and logs to console + file
-- A **live trader** (spot-only) that can place real orders (dry-run by default)
+## Strategy Architecture (Top-Down Workflow)
 
-> Design constraints (by spec): BTC/ETH only, intraday holding (minutes to hours), only 4H/1H/15M timeframes, no indicator overload.
+Below is the deterministic decision pipeline used for every trade:
 
----
+```
+                ┌─────────────────────────┐
+                │        4H Context       │
+                │  Market Structure Only  │
+                │  → BUY / SELL / HOLD    │
+                └────────────┬────────────┘
+                             │
+                             ▼
+                ┌─────────────────────────┐
+                │        1H Setup         │
+                │  BOS / CHOCH + OB/FVG   │
+                │  Alignment Required     │
+                └────────────┬────────────┘
+                             │
+                             ▼
+                ┌─────────────────────────┐
+                │       15M Entry         │
+                │ Liquidity Sweep +       │
+                │ Candle Confirmation     │
+                └────────────┬────────────┘
+                             │
+                             ▼
+                ┌─────────────────────────┐
+                │  Entry / Stop / Target  │
+                │  RR-Based Execution     │
+                └─────────────────────────┘
+```
 
-## What This Project Does
+If any stage fails, no trade is placed. This prevents overtrading and enforces structural alignment across timeframes.
 
-### Strategy pipeline (top-down)
-1. **4H Bias** (`BUY` / `SELL` / `HOLD`)
-   - Derived from 4H market structure only.
-   - If structure is unclear/sideways → `HOLD` (no trades).
+## Strategy Logic in Detail
 
-2. **1H Setup** (`setup_valid: true/false`)
-   - Must align with the 4H bias.
-   - Validates:
-     - 1H market structure alignment
-     - a footprint event: **BOS** or **CHOCH**
-     - price location inside a 1H **Order Block (OB)** or **Fair Value Gap (FVG)**
+1. **4H Bias — Market Context** (`BUY` / `SELL` / `HOLD`)
+  - Derived from 4H market structure only.
+  - Uses price-action filters (range compression + structure strength).
+  - If structure is unclear/sideways → `HOLD` (no trades).
 
-3. **15M Entry** (`entry_signal: true/false`)
-   - Must align with bias + setup.
-   - Confirms:
-     - **liquidity grab** (sweep + reclaim)
-     - price in OB/FVG
-     - candle confirmation (engulfing / pinbar / hammer or inside-bar breakout confirmation)
-   - Computes:
-     - `entry_price`
-     - `stop` (structure-based, with optional ATR minimum distance)
-     - `target` (RR-based)
+2. **1H Setup — Institutional Footprint**
+  - Must align with the 4H bias.
+  - Validates:
+    - 1H market structure alignment
+    - a footprint event: **BOS** or **CHOCH**
+    - price location inside a 1H **Order Block (OB)** or **Fair Value Gap (FVG)**
+    - HTF liquidity proximity (equal highs/lows)
+  - Range-compression/low-volatility guard (price-action only)
+  - Zone proximity filter to avoid far-away setups
 
-The main “signal” output is produced by `generate_signal()` in [strategies/multi_timeframe.py](strategies/multi_timeframe.py).
+3. **15M Entry — Confirmation Layer**
+  - Must align with bias + setup.
+  - Confirms:
+    - liquidity sweep + reclaim of HTF liquidity
+    - price in OB/FVG with first-tap validation
+    - candle confirmation (engulfing, pinbar/hammer, or inside-bar breakout)
+  - Computes:
+    - `entry_price`
+    - `stop` (15M structure with optional ATR guard)
+    - `target` (RR-based)
 
----
+The main signal output is produced by `generate_signal()` in [strategies/smc_signal.py](strategies/smc_signal.py). It returns:
 
-## Repo Layout
+- `bias_4h`, `setup_1h`, `entry_15m`
+- Convenience fields: `bias`, `setup_valid`, `entry_signal`
 
-- [strategies/](strategies/): strategy pipeline
-- [indicators/](indicators/): structure, BOS/CHOCH, OB, FVG, liquidity grab detection
-- [utils/](utils/): data/candle helpers
-- [broker/](broker/): broker simulation + risk manager
-- [exchange/](exchange/): ccxt exchange wrapper
-- [trader/](trader/): paper trader implementation
-- [backtest.py](backtest.py): CSV backtest runner + trade log output
-- [logs/](logs/): per-run log files
-- [data/raw/](data/raw/)
-  - CSV candles for BTC/ETH at 15M/1H/4H
+## Repository Structure
 
----
+```
+strategies/        → Multi-timeframe pipeline
+indicators/        → BOS, CHOCH, OB, FVG, liquidity logic
+broker/            → Risk manager + execution simulation
+exchange/          → ccxt exchange wrapper
+trader/            → Paper trader
+scripts/           → Data fetching helpers
+utils/             → Candle helpers and shared utilities
+backtest.py        → CSV backtest runner
+main.py            → One-shot signal snapshot
+logs/              → Runtime logs
+data/raw/          → BTC & ETH OHLCV data (15M/1H/4H)
+```
 
 ## Installation
 
-### 1) Python environment
-Recommended: Python 3.10+.
+### Python Environment
 
-```bash
+Recommended: Python 3.10+
+
+```
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2) Data
-Backtest uses the provided CSVs under [data/raw/](data/raw/).
+### Data
 
-Paper trading fetches market data from Binance using `ccxt`.
+Backtesting uses CSV files in:
 
----
+```
+data/raw/
+```
 
-## Backtesting (CSV)
+Paper trading fetches data via ccxt (default: Binance).
+
+## Backtesting (CSV Engine)
 
 Run:
 
-```bash
+```
 python3 -m backtest
 ```
 
-Options:
+With options:
 
-```bash
+```
 python3 -m backtest --symbols BTC --log-skips
 ```
 
 Output:
-- Console logs include `TRADE | ...` lines when trades trigger.
-- Backtest results are written to logs/backtest_YYYYMMDD_HHMMSS.log (no CSV output).
+- Console logs show `TRADE | ...` and `SKIP | ...`
+- Log file saved to:
 
-Trade log format example:
+```
+logs/backtest_YYYYMMDD_HHMMSS.log
+```
+
+Example:
 
 ```
 YYYY-MM-DD HH:MM:SS | INFO | TRADE | BTC | SELL | Entry: ... | Exit: ... | PnL: ... | Capital: ...
 ```
 
----
+## Paper Trading (Simulation)
 
-## Paper Trading (Spot-only)
-
-The paper trader:
-- fetches 4H/1H/15M candles via Binance REST (`ccxt`)
-- runs the same `generate_signal()` strategy logic
-- simulates spot execution:
-  - **BUY** may open a long
-  - **SELL** may open a short (simulated)
-- logs to console + a per-run log file
+Simulates:
+- Candle fetching via REST (ccxt)
+- Real-time signal generation
+- Spot-like broker simulation (supports LONG and SHORT)
+- Console + per-run file logging
 
 Run:
 
-```bash
+```
 python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30
 ```
 
-Useful options:
+Advanced example:
 
-```bash
-python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT --poll 5 --cash 10000 --risk 0.01 \
+```
+python3 -m trader.paper_trader \
+  --exchange binance \
+  --symbols BTC/USDT \
+  --poll 5 \
+  --cash 10000 \
+  --risk 0.01 \
   --log logs/paper.log
 ```
 
-Console output:
-- A line is printed every loop even if no trade is taken:
+Logs:
+- Console `SKIP | ...` when conditions fail
+- Console `TRADE | ...` when fills occur
+- File logs are saved as `logs/paper_YYYYMMDD_HHMMSS.log`
+
+## Optional Signal Snapshot
+
+Run a one-shot signal evaluation with:
 
 ```
-YYYY-MM-DD HH:MM:SS | INFO | SKIP | BTC | bias=HOLD | setup_valid=False | entry_signal=False | reason=...
+python3 -m main
 ```
 
-- When a position opens/closes/exits, a `TRADE | ...` line is printed.
-
-Paper log events include:
-- `event`: `TRADE`, `SKIP`, `ERROR`
-- `reason`: why the trade was skipped or how the trade exited
-
----
-
-## Live Trading (Spot-only)
-
-The live trader is under [live/](live/) and:
-- fetches 4H/1H/15M candles via Binance REST (`ccxt`)
-- runs the same `generate_signal()` strategy logic
-- enforces spot-only execution (long-only)
-- places **real market orders only if you pass `--live`**
-
-Dry-run (recommended first; no API keys required):
-
-```bash
-python3 -m live.live_trader --symbols BTC/USDT,ETH/USDT --poll 30 --dry-capital 1000 --risk 0.01
-```
-
-Live trading (places real orders):
-
-```bash
-export BINANCE_API_KEY='...'
-export BINANCE_API_SECRET='...'
-python3 -m live.live_trader --live --symbols BTC/USDT,ETH/USDT --poll 30 --risk 0.01
-```
-
-Outputs:
-- logs: [live/logs/live.log](live/logs/live.log)
-- trade audit: [live/logs/live_trades.csv](live/logs/live_trades.csv)
-- position state: [live/state.json](live/state.json)
-
----
+By default it writes a CSV to `signals/output_signals.csv`. Create the `signals/` directory if you want that output.
 
 ## Risk Management
 
-### Stop and target
-Implemented in [strategies/multi_timeframe.py](strategies/multi_timeframe.py):
-- Stop starts as structure-based (15M candle high/low).
-- Optional ATR guard (enabled by default): enforce a minimum stop distance using **15M ATR(20) × 1.0**.
-- Target is RR-based: `target = entry ± RR_MULT × |entry - stop|`.
+### Stop Logic
+- Structure-based (latest 15M high/low)
+- Optional ATR guard (see `utils/helpers.py`)
 
-### Paper sizing
-Implemented in [broker/risk_manager.py](broker/risk_manager.py):
-- Position size uses equity risk percent and stop distance.
-- Also caps notional and applies a minimum notional guard.
+### Target Logic
 
----
+`target = entry ± RR_MULT × |entry - stop|`
 
-## Determinism & Framework Compliance
+### Position Sizing
 
-This project is intentionally minimal:
-- No extra timeframes beyond **4H/1H/15M**.
-- No extra indicators like RSI/MACD/EMA/VWAP unless you explicitly add them.
-- Signals are rule-based and deterministic.
-
----
+Defined in `broker/risk_manager.py` with fee and slippage guards.
 
 ## Known Limitations
 
-- **Backtest** simulates stop/target per 15M candle; no fees/slippage.
-- **Paper broker** is simplified: market orders fill with slippage/fees; no partial fills, no latency.
+### Backtest
+- No fees
+- No slippage
+- Candle-level stop/target simulation
 
----
+### Paper Trader
+- No latency modeling
+- No partial fills
+- Simplified slippage and fee model
 
-## Future Improvements (Safe & In-Scope)
+## Philosophy
 
-These ideas keep the same 4H/1H/15M framework and remain deterministic:
+This is not a signal toy. It is a strict execution engine built around:
 
-1. **Execution realism**
-   - Add fees + slippage to paper and backtest.
-   - Add candle-by-candle stop/target simulation for backtests.
+- Multi-timeframe structural alignment
+- Liquidity logic
+- Institutional footprint detection
+- Controlled risk exposure
 
-2. **Robustness & observability**
-   - Add unit tests for structure/BOS/CHOCH, liquidity grab, and zone parsing.
-   - Add a “health” log line with fetch durations and last candle timestamps.
-
-3. **Risk & trade management**
-   - Add partial take-profit + break-even logic after first target (still deterministic).
-   - Add daily max loss / max trades per day guardrails.
-
-4. **Data handling**
-   - Cache fetched OHLCV to reduce API calls.
-   - Validate candle continuity (missing bars) before generating signals.
-
----
-
-## Quick Start
-
-- Backtest:
-  - `python3 -m backtest --symbols BTC,ETH`
-
-- Paper trade (spot-only):
-  - `python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30`
-
-If you want, tell me whether you trade **spot only** or also want **perpetuals** later; I can keep the framework identical and only change the execution layer accordingly.
+If you later decide to trade perpetual futures instead of spot, the strategy layer remains identical and only the execution layer changes.

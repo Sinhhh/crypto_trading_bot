@@ -18,6 +18,7 @@ if PROJECT_ROOT not in sys.path:
 # Custom modules
 from strategies.smc_signal import generate_signal
 from utils.data_loader import load_csv_data, normalize_ohlcv
+from indicators.atr import compute_atr  # ATR cho dynamic TP/SL
 
 # -------------------------------
 # Logging setup
@@ -42,7 +43,6 @@ fh = logging.FileHandler(log_path, mode="w")
 fh.setLevel(logging.INFO)
 fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 logger.addHandler(fh)
-
 logger.info(f"Backtest started, log file: {log_path}")
 
 # -------------------------------
@@ -75,46 +75,50 @@ def _parse_symbols(raw: str | None) -> list[str]:
     return out
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SMC Backtest with Partial Exit + Trailing Stop")
+    parser = argparse.ArgumentParser(description="SMC Backtest with Dynamic ATR TP/SL + Trend Filter")
     parser.add_argument("--symbols", type=str, default=None, help="Comma-separated list: BTC,ETH")
     parser.add_argument("--log-skips", action="store_true", help="Print per-candle SKIP reasons")
     return parser
 
 # -------------------------------
-# Trade simulation with Partial + Trailing
+# Dynamic ATR Trade Simulation
 # -------------------------------
-def simulate_trade_partial_trailing(df_15m, entry_idx, entry_price, stop, target, bias, max_bars=48, logger=None):
+def simulate_trade_dynamic_atr(df_15m, entry_idx, entry_price, bias, max_bars=48, logger=None):
+    """
+    Trailing stop & partial TP dynamically based on ATR
+    """
     exit_logs = []
     partial_taken = False
-    remaining_position = 1.0  # 100%
+    remaining_position = 1.0
 
+    # Compute ATR for 15M candles
+    atr_series = compute_atr(df_15m, period=14)
     for j in range(entry_idx + 1, min(entry_idx + max_bars, len(df_15m))):
         candle = df_15m.iloc[j]
         price = candle["close"]
+        atr = atr_series.iloc[j] if j < len(atr_series) else atr_series.iloc[-1]
 
-        # BUY logic
+        # Dynamic TP / SL
         if bias == "BUY":
-            # Trailing stop after partial
+            stop = entry_price - 1.5 * atr
+            target = entry_price + 2 * atr
             if partial_taken:
-                new_stop = max(stop, price * 0.98)  # Trailing 2% stop
-                stop = new_stop
-            # Check stop
+                stop = max(stop, price - 1.5 * atr)  # trailing
             if candle["low"] <= stop:
                 pnl = (stop - entry_price) * POSITION_SIZE / entry_price * remaining_position
                 exit_logs.append(("STOP", pnl, candle["timestamp"], remaining_position))
                 return exit_logs
-            # Partial exit at target
             if not partial_taken and candle["high"] >= target:
                 pnl = (target - entry_price) * POSITION_SIZE / entry_price * 0.5
                 partial_taken = True
                 remaining_position = 0.5
                 exit_logs.append(("PARTIAL_TARGET", pnl, candle["timestamp"], 0.5))
 
-        # SELL logic
         elif bias == "SELL":
+            stop = entry_price + 1.5 * atr
+            target = entry_price - 2 * atr
             if partial_taken:
-                new_stop = min(stop, price * 1.02)  # Trailing up 2%
-                stop = new_stop
+                stop = min(stop, price + 1.5 * atr)
             if candle["high"] >= stop:
                 pnl = (entry_price - stop) * POSITION_SIZE / entry_price * remaining_position
                 exit_logs.append(("STOP", pnl, candle["timestamp"], remaining_position))
@@ -125,7 +129,6 @@ def simulate_trade_partial_trailing(df_15m, entry_idx, entry_price, stop, target
                 remaining_position = 0.5
                 exit_logs.append(("PARTIAL_TARGET", pnl, candle["timestamp"], 0.5))
 
-    # Time exit if max bars reached
     last = df_15m.iloc[min(entry_idx + max_bars, len(df_15m)-1)]
     pnl = ((last["close"] - entry_price) if bias=="BUY" else (entry_price - last["close"])) * POSITION_SIZE / entry_price * remaining_position
     exit_logs.append(("TIME_EXIT", pnl, last["timestamp"], remaining_position))
@@ -145,6 +148,7 @@ def backtest_symbol(symbol, log_skips=False):
     logger.info(f"=== Starting backtest for {symbol} | Capital: {capital} ===\n")
     in_trade = False
     trade_exit_idx = None
+    skip_reasons = {"BIAS": {}, "SETUP": {}, "ENTRY": {}}
 
     for i in range(2, len(df_15m)):
         if in_trade and i <= trade_exit_idx:
@@ -168,16 +172,35 @@ def backtest_symbol(symbol, log_skips=False):
         setup = signals["setup_1h"]
         entry = signals["entry_15m"]
 
-        if not setup["setup_valid"] or bias=="HOLD" or not entry["entry_signal"]:
+        # -------------------------
+        # Log SKIP reasons
+        # -------------------------
+        if bias == "HOLD":
+            reason = "BIAS_HOLD"
+            skip_reasons["BIAS"][reason] = skip_reasons["BIAS"].get(reason, 0) + 1
             if log_skips:
-                logger.info(f"SKIP | {symbol} | ts={ts} | bias={bias} | setup_valid={setup['setup_valid']} | entry_signal={entry['entry_signal']}")
+                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
             continue
 
-        entry_price = entry["entry_price"]
-        stop = entry["stop"]
-        target = entry["target"]
+        if not setup["setup_valid"]:
+            reason = setup.get("reason", "SETUP_INVALID")
+            skip_reasons["SETUP"][reason] = skip_reasons["SETUP"].get(reason, 0) + 1
+            if log_skips:
+                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
+            continue
 
-        exit_logs = simulate_trade_partial_trailing(df_15m, i, entry_price, stop, target, bias, logger=logger)
+        if not entry["entry_signal"]:
+            reason = entry.get("reason", "ENTRY_INVALID")
+            skip_reasons["ENTRY"][reason] = skip_reasons["ENTRY"].get(reason, 0) + 1
+            if log_skips:
+                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
+            continue
+
+        # -------------------------
+        # Execute trade
+        # -------------------------
+        entry_price = entry["entry_price"]
+        exit_logs = simulate_trade_dynamic_atr(df_15m, i, entry_price, bias, logger=logger)
         trade_exit_idx = i + len(exit_logs)
         in_trade = True
 
@@ -189,8 +212,6 @@ def backtest_symbol(symbol, log_skips=False):
                 "exit_ts": exit_ts,
                 "bias": bias,
                 "entry": entry_price,
-                "stop": stop,
-                "target": target,
                 "exit_reason": reason,
                 "pnl_usd": pnl_usd,
                 "capital": capital,
@@ -201,6 +222,7 @@ def backtest_symbol(symbol, log_skips=False):
     df_trades = pd.DataFrame(trades)
     total_pnl = df_trades["pnl_usd"].sum() if not df_trades.empty else 0.0
     winrate = (len(df_trades[df_trades["pnl_usd"]>0])/len(df_trades)*100) if len(df_trades) else 0.0
+
     print(f"\n=== BACKTEST SUMMARY | {symbol} ===")
     print(f"Trades: {len(df_trades)}")
     print(f"Winrate: {winrate:.2f}%")

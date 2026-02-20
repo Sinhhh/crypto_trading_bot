@@ -54,15 +54,50 @@ def is_first_tap_zone(
     zone_high: float,
     current_idx: int,
     lookback: int = 50,
+    wick_tolerance: float = 0.15,
 ) -> bool:
     """
     Returns True if the current candle is the FIRST time price taps this zone.
     """
+    zone_low, zone_high = float(min(zone_low, zone_high)), float(max(zone_low, zone_high))
+    zone_height = max(zone_high - zone_low, 0.0)
     start = max(0, current_idx - lookback)
+    median_range = None
+    if df is not None and len(df) > 0:
+        window = df.iloc[start:current_idx]
+        if not window.empty:
+            median_range = float((window["high"] - window["low"]).median())
     for i in range(start, current_idx):
         candle = df.iloc[i]
-        if _candle_overlaps_zone(candle, zone_low, zone_high):
+        if not _candle_overlaps_zone(candle, zone_low, zone_high):
+            continue
+
+        body_low = float(min(candle["open"], candle["close"]))
+        body_high = float(max(candle["open"], candle["close"]))
+        body_overlaps = body_low <= zone_high and body_high >= zone_low
+        if body_overlaps:
             return False
+
+        if zone_height <= 0:
+            return False
+
+        overlap = min(float(candle["high"]), zone_high) - max(
+            float(candle["low"]), zone_low
+        )
+        if overlap <= 0:
+            continue
+
+        wick_ratio = overlap / zone_height
+        if median_range is not None:
+            vol_ratio = median_range / max(zone_height, 1e-9)
+            adaptive_tol = min(0.30, max(0.10, 0.12 + 0.1 * vol_ratio))
+        else:
+            adaptive_tol = wick_tolerance
+
+        if wick_ratio <= adaptive_tol:
+            continue
+
+        return False
     return True
 
 

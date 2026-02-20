@@ -4,6 +4,8 @@ from indicators.structure import (
     detect_market_structure,
     detect_bos_choch_v2,
     detect_bos_index,
+    _find_swings_robust,
+    get_last_structure_levels,
 )
 
 from indicators.order_blocks import (
@@ -33,17 +35,48 @@ from utils.helpers import (
 
 # Liquidity zone parameters (1H)
 LIQ_LOOKBACK_1H = 60
-LIQ_MIN_TOUCHES = 1
+LIQ_MIN_TOUCHES = 2
 LIQ_TOLERANCE = 0.0030
 LIQ_PROXIMITY = 0.0040
+
+# Adaptive filters (price-action only)
+MIN_ZONE_PROX_PCT = 0.002
+MAX_ZONE_PROX_PCT = 0.008
+BOS_BREAK_PCT = 0.05
 
 
 # ---------------------------
 # 4H BIAS
 # ---------------------------
 def get_4h_bias(df_4h: pd.DataFrame) -> str:
+    if df_4h is None or len(df_4h) < 40:
+        return "HOLD"
+
     structure = detect_market_structure(df_4h)
     supply_zones, demand_zones = detect_supply_demand(df_4h)
+
+    # Range compression filter (price-action only)
+    recent = df_4h.tail(20)
+    prev = df_4h.iloc[-40:-20]
+    recent_range = float(recent["high"].max() - recent["low"].min())
+    prev_range = float(prev["high"].max() - prev["low"].min())
+    if prev_range > 0 and (recent_range / prev_range) < 0.6:
+        return "HOLD"
+
+    # Structure strength: require meaningful HH/HL or LH/LL moves
+    swing_highs, swing_lows = _find_swings_robust(
+        df_4h, left=2, right=2, min_range_ratio=0.5
+    )
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return "HOLD"
+
+    _, h1 = swing_highs[-2]
+    _, h2 = swing_highs[-1]
+    _, l1 = swing_lows[-2]
+    _, l2 = swing_lows[-1]
+    if recent_range > 0:
+        if abs(h2 - h1) < 0.3 * recent_range and abs(l2 - l1) < 0.3 * recent_range:
+            return "HOLD"
 
     last_close = None
     if df_4h is not None and len(df_4h) > 0:
@@ -98,6 +131,30 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
     # -------------------------
     structure = detect_market_structure(df_1h)
     bos, choch, break_dir = detect_bos_choch_v2(df_1h, structure)
+
+    # Range compression / low-volatility filter (price-action only)
+    if len(df_1h) >= 40:
+        recent = df_1h.tail(20)
+        prev = df_1h.iloc[-40:-20]
+        recent_range = float(recent["high"].max() - recent["low"].min())
+        prev_range = float(prev["high"].max() - prev["low"].min())
+        if prev_range > 0 and (recent_range / prev_range) < 0.6:
+            return result
+
+    last_close = float(df_1h.iloc[-1]["close"])
+    recent_ranges = (df_1h["high"] - df_1h["low"]).tail(20)
+    if recent_ranges.median() / max(last_close, 1e-9) < 0.001:
+        return result
+
+    # BOS quality: require a meaningful break beyond the last structure level
+    last_high, last_low = get_last_structure_levels(df_1h)
+    recent_range = float(recent_ranges.max()) if not recent_ranges.empty else 0.0
+    if break_dir == "BULL" and last_high is not None and recent_range > 0:
+        if last_close < (last_high + BOS_BREAK_PCT * recent_range):
+            return result
+    if break_dir == "BEAR" and last_low is not None and recent_range > 0:
+        if last_close > (last_low - BOS_BREAK_PCT * recent_range):
+            return result
 
     FRESH_BOS_WINDOW = 8  # 8 cây 1H gần nhất (~8 giờ)
     if bos:
@@ -173,9 +230,16 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
         tolerance=LIQ_TOLERANCE,
     )
 
+    def _liq_cluster_ok(cluster: dict) -> bool:
+        span = float(cluster.get("max", 0)) - float(cluster.get("min", 0))
+        level = float(cluster.get("level", 0))
+        return level > 0 and span / level <= (LIQ_TOLERANCE * 2)
+
     # HTF liquidity levels (for LTF sweep validation)
     htf_liquidity = []
     for z in liq.get("equal_lows", []):
+        if not _liq_cluster_ok(z):
+            continue
         htf_liquidity.append(
             {
                 "type": "BUY",
@@ -184,6 +248,8 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
         )
 
     for z in liq.get("equal_highs", []):
+        if not _liq_cluster_ok(z):
+            continue
         htf_liquidity.append(
             {
                 "type": "SELL",
@@ -192,17 +258,27 @@ def get_1h_setup(df_1h: pd.DataFrame, bias: str) -> dict:
         )
 
     last_close = float(df_1h.iloc[-1]["close"])
+    base_range_pct = (recent_range / max(last_close, 1e-9)) if recent_range > 0 else 0
+    prox_pct = min(MAX_ZONE_PROX_PCT, max(MIN_ZONE_PROX_PCT, base_range_pct))
+    liq_prox = min(MAX_ZONE_PROX_PCT, max(LIQ_PROXIMITY, base_range_pct))
 
     def _near(level: float) -> bool:
-        return abs(last_close - float(level)) / max(last_close, 1e-9) <= LIQ_PROXIMITY
+        return abs(last_close - float(level)) / max(last_close, 1e-9) <= liq_prox
+
+    def _zone_near_price(zone: dict) -> bool:
+        mid = (float(zone["low"]) + float(zone["high"])) / 2.0
+        return abs(last_close - mid) / max(last_close, 1e-9) <= prox_pct
+
+    if not any(_zone_near_price(z) for z in zones):
+        return result
 
     if bias == "BUY":
         result["liquidity_zone_ok"] = any(
-            _near(z["level"]) for z in liq.get("equal_lows", [])
+            _liq_cluster_ok(z) and _near(z["level"]) for z in liq.get("equal_lows", [])
         )
     else:
         result["liquidity_zone_ok"] = any(
-            _near(z["level"]) for z in liq.get("equal_highs", [])
+            _liq_cluster_ok(z) and _near(z["level"]) for z in liq.get("equal_highs", [])
         )
 
     # -------------------------

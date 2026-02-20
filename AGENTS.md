@@ -18,7 +18,7 @@ Do NOT add extra indicators, timeframes, or concepts outside this specification.
 ## 2. Multi-Timeframe Framework (Top-down)
 
 ### 4H – Higher Timeframe Context (Bias)
-Purpose: Answer **BUY or SELL only**
+Purpose: Answer **BUY / SELL / HOLD only**
 
 Use 4H data to determine:
 - Market direction: **UP / DOWN / SIDEWAY**
@@ -29,7 +29,7 @@ Use 4H data to determine:
 Rules:
 - If structure is bullish → only look for BUY setups
 - If structure is bearish → only look for SELL setups
-- If sideway / unclear → NO TRADE
+- If sideway / unclear → `HOLD` (no trade)
 
 4H does NOT provide entry signals.
 
@@ -124,4 +124,5 @@ Generate clean, production-ready trading logic that faithfully implements this f
 ---
 
 ## Repo Notes (Current)
-- Paper trading and backtests log to per-run log files; CSV outputs are not used.
+- Paper trading and backtests log to per-run log files.
+- Signal snapshots can optionally write a CSV (see `main.py`).
