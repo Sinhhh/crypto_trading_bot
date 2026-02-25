@@ -59,7 +59,9 @@ def is_first_tap_zone(
     """
     Returns True if the current candle is the FIRST time price taps this zone.
     """
-    zone_low, zone_high = float(min(zone_low, zone_high)), float(max(zone_low, zone_high))
+    zone_low, zone_high = float(min(zone_low, zone_high)), float(
+        max(zone_low, zone_high)
+    )
     zone_height = max(zone_high - zone_low, 0.0)
     start = max(0, current_idx - lookback)
     median_range = None

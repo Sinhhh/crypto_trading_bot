@@ -10,12 +10,17 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from strategies.smc_signal import generate_signal
-from utils.data_loader import normalize_ohlcv
+SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
 
-from exchange.ccxt_exchange import CCXTExchange
-from broker.broker_sim import BrokerSim
-from broker.risk_manager import RiskConfig, RiskManager
+from core.strategies.smc_signal import generate_signal
+from data.data_loader import normalize_ohlcv
+
+from core.exchange.ccxt_exchange import CCXTExchange
+from core.broker.broker_sim import BrokerSim
+from core.risk.risk_manager import RiskManagerV2
+from core.risk.risk_config import RiskConfigV2
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,7 @@ class PaperTrader:
         cfg: PaperConfig,
         exchange: CCXTExchange,
         broker: BrokerSim,
-        risk: RiskManager,
+        risk: RiskManagerV2,
         logger: logging.Logger,
     ):
         self.cfg = cfg
@@ -443,8 +448,8 @@ def main() -> None:
     logger = _setup_logger(cfg.log_path)
     ex = CCXTExchange(cfg.exchange_id)
     broker = BrokerSim(starting_cash_usdt=args.cash)
-    risk = RiskManager(
-        RiskConfig(
+    risk = RiskManagerV2(
+        RiskConfigV2(
             risk_pct=args.risk,
             fee_pct=broker.fee_pct,
             slippage_pct=broker.slippage_pct,

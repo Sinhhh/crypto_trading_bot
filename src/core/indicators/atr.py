@@ -1,6 +1,7 @@
 # indicators/atr.py
 import pandas as pd
 
+
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     Average True Range (ATR)

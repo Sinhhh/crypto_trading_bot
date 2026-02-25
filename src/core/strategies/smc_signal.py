@@ -1,6 +1,6 @@
 import pandas as pd
 
-from indicators.structure import (
+from core.indicators.structure import (
     detect_market_structure,
     detect_bos_choch_v2,
     detect_bos_index,
@@ -8,13 +8,16 @@ from indicators.structure import (
     get_last_structure_levels,
 )
 
-from indicators.order_blocks import (
+from core.indicators.order_blocks import (
     identify_order_blocks_clean,
     filter_fresh_order_blocks,
 )
-from indicators.fvg import identify_fvg_clean
-from indicators.liquidity import detect_liquidity_grab_v2, detect_liquidity_zones
-from indicators.supply_demand import detect_supply_demand
+from core.indicators.fvg import identify_fvg_clean
+from core.indicators.liquidity import (
+    detect_liquidity_grab_v2,
+    detect_liquidity_zones,
+)
+from core.indicators.supply_demand import detect_supply_demand
 
 from utils.candle_utils import (
     is_bullish_engulfing,

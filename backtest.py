@@ -1,24 +1,32 @@
+#!/usr/bin/env python3
+# backtest.py — CSV backtest runner using RiskManagerV2 + PaperTrader
+
 import os
 import sys
 import logging
 import argparse
 import pandas as pd
-
 from datetime import datetime
-
-from utils.helpers import slice_lookback
 
 # -------------------------------
 # Project setup
 # -------------------------------
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SRC_PATH = os.path.join(PROJECT_ROOT, "src")
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
 
+# -------------------------------
 # Custom modules
-from strategies.smc_signal import generate_signal
-from utils.data_loader import load_csv_data, normalize_ohlcv
-from indicators.atr import compute_atr  # ATR cho dynamic TP/SL
+# -------------------------------
+from utils.helpers import slice_lookback
+from data.data_loader import load_csv_data, normalize_ohlcv
+from core.strategies.smc_signal import generate_signal
+from core.indicators.atr import compute_atr
+from core.risk.risk_manager import RiskManagerV2
+from core.risk.risk_config import RiskConfigV2
+from core.trader.paper_trader import PaperTrader
+from core.broker.broker_sim import BrokerSim
 
 # -------------------------------
 # Logging setup
@@ -49,14 +57,26 @@ logger.info(f"Backtest started, log file: {log_path}")
 # Config
 # -------------------------------
 DEFAULT_SYMBOLS = ["BTC"]
-INITIAL_CAPITAL = 10000
-POSITION_SIZE = 1000
+INITIAL_CAPITAL = 10_000
 LOOKBACK_15M = 50
 LOOKBACK_1H = 200
 LOOKBACK_4H = 100
 
+# RiskManagerV2 config
+RISK_CFG = RiskConfigV2(
+    base_risk_pct=0.01,
+    min_risk_pct=0.0025,
+    max_portfolio_risk_pct=0.05,
+    dd_soft_limit=0.05,
+    dd_hard_limit=0.10,
+    max_symbol_risk_pct=0.02,
+    min_rr=2.0,
+    enable_quality_scaling=True,
+)
+
+
 # -------------------------------
-# Helpers
+# CLI parser
 # -------------------------------
 def _parse_symbols(raw: str | None) -> list[str]:
     if not raw:
@@ -74,89 +94,65 @@ def _parse_symbols(raw: str | None) -> list[str]:
             seen.add(s)
     return out
 
+
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SMC Backtest with Dynamic ATR TP/SL + Trend Filter")
-    parser.add_argument("--symbols", type=str, default=None, help="Comma-separated list: BTC,ETH")
-    parser.add_argument("--log-skips", action="store_true", help="Print per-candle SKIP reasons")
+    parser = argparse.ArgumentParser(
+        description="SMC Backtest with RiskManagerV2 + ATR TP/SL"
+    )
+    parser.add_argument(
+        "--symbols", type=str, default=None, help="Comma-separated list: BTC,ETH"
+    )
+    parser.add_argument(
+        "--log-skips", action="store_true", help="Print per-candle SKIP reasons"
+    )
     return parser
 
-# -------------------------------
-# Dynamic ATR Trade Simulation
-# -------------------------------
-def simulate_trade_dynamic_atr(df_15m, entry_idx, entry_price, bias, max_bars=48, logger=None):
-    """
-    Trailing stop & partial TP dynamically based on ATR
-    """
-    exit_logs = []
-    partial_taken = False
-    remaining_position = 1.0
 
-    # Compute ATR for 15M candles
+# -------------------------------
+# Trade simulation
+# -------------------------------
+def simulate_trade_dynamic_atr(trader: PaperTrader, df_15m, entry_idx, symbol, bias):
+    """
+    Simulate trade exit based on ATR trailing stops and targets
+    """
     atr_series = compute_atr(df_15m, period=14)
-    for j in range(entry_idx + 1, min(entry_idx + max_bars, len(df_15m))):
+    entry_candle = df_15m.iloc[entry_idx]
+    entry_price = entry_candle["close"]
+
+    for j in range(entry_idx + 1, len(df_15m)):
         candle = df_15m.iloc[j]
         price = candle["close"]
         atr = atr_series.iloc[j] if j < len(atr_series) else atr_series.iloc[-1]
 
-        # Dynamic TP / SL
-        if bias == "BUY":
-            stop = entry_price - 1.5 * atr
-            target = entry_price + 2 * atr
-            if partial_taken:
-                stop = max(stop, price - 1.5 * atr)  # trailing
-            if candle["low"] <= stop:
-                pnl = (stop - entry_price) * POSITION_SIZE / entry_price * remaining_position
-                exit_logs.append(("STOP", pnl, candle["timestamp"], remaining_position))
-                return exit_logs
-            if not partial_taken and candle["high"] >= target:
-                pnl = (target - entry_price) * POSITION_SIZE / entry_price * 0.5
-                partial_taken = True
-                remaining_position = 0.5
-                exit_logs.append(("PARTIAL_TARGET", pnl, candle["timestamp"], 0.5))
+        # Update broker price
+        trader.broker.set_last_price(symbol, price)
 
-        elif bias == "SELL":
-            stop = entry_price + 1.5 * atr
-            target = entry_price - 2 * atr
-            if partial_taken:
-                stop = min(stop, price + 1.5 * atr)
-            if candle["high"] >= stop:
-                pnl = (entry_price - stop) * POSITION_SIZE / entry_price * remaining_position
-                exit_logs.append(("STOP", pnl, candle["timestamp"], remaining_position))
-                return exit_logs
-            if not partial_taken and candle["low"] <= target:
-                pnl = (entry_price - target) * POSITION_SIZE / entry_price * 0.5
-                partial_taken = True
-                remaining_position = 0.5
-                exit_logs.append(("PARTIAL_TARGET", pnl, candle["timestamp"], 0.5))
+        # Check stop / target
+        exit_data = trader.broker.check_stop_target(symbol)
+        if exit_data:
+            yield exit_data
 
-    last = df_15m.iloc[min(entry_idx + max_bars, len(df_15m)-1)]
-    pnl = ((last["close"] - entry_price) if bias=="BUY" else (entry_price - last["close"])) * POSITION_SIZE / entry_price * remaining_position
-    exit_logs.append(("TIME_EXIT", pnl, last["timestamp"], remaining_position))
-    return exit_logs
 
 # -------------------------------
-# Backtest function
+# Backtest loop
 # -------------------------------
-def backtest_symbol(symbol, log_skips=False):
-    capital = INITIAL_CAPITAL
-    trades = []
+def backtest_symbol(symbol: str, log_skips=False):
+    # Setup broker and trader
+    broker = BrokerSim(starting_cash_usdt=INITIAL_CAPITAL)
+    risk_manager = RiskManagerV2(broker, RISK_CFG)
+    trader = PaperTrader(
+        cfg=None, exchange=None, broker=broker, risk=risk_manager, logger=logger
+    )
+
+    trades_log = []
 
     df_4h = normalize_ohlcv(load_csv_data(f"data/raw/{symbol}_4H.csv"))
     df_1h = normalize_ohlcv(load_csv_data(f"data/raw/{symbol}_1H.csv"))
     df_15m = normalize_ohlcv(load_csv_data(f"data/raw/{symbol}_15M.csv"))
 
-    logger.info(f"=== Starting backtest for {symbol} | Capital: {capital} ===\n")
-    in_trade = False
-    trade_exit_idx = None
-    skip_reasons = {"BIAS": {}, "SETUP": {}, "ENTRY": {}}
+    print(f"=== Starting backtest for {symbol} | Capital: {INITIAL_CAPITAL} ===\n")
 
     for i in range(2, len(df_15m)):
-        if in_trade and i <= trade_exit_idx:
-            continue
-        elif in_trade:
-            in_trade = False
-            trade_exit_idx = None
-
         ts = df_15m.iloc[i]["timestamp"]
         current_15m = slice_lookback(df_15m, ts, LOOKBACK_15M)
         current_1h = slice_lookback(df_1h, ts, LOOKBACK_1H)
@@ -164,74 +160,80 @@ def backtest_symbol(symbol, log_skips=False):
 
         if len(current_4h) < 50 or current_1h.empty or current_4h.empty:
             if log_skips:
-                logger.info(f"SKIP | {symbol} | ts={ts} | insufficient higher timeframe data")
+                logger.info(
+                    f"SKIP | {symbol} | ts={ts} | insufficient higher timeframe data"
+                )
             continue
 
         signals = generate_signal(current_4h, current_1h, current_15m)
-        bias = signals["bias_4h"]
-        setup = signals["setup_1h"]
-        entry = signals["entry_15m"]
+        bias = signals.get("bias_4h", "HOLD")
+        setup = signals.get("setup_1h", {})
+        entry = signals.get("entry_15m", {})
 
-        # -------------------------
-        # Log SKIP reasons
-        # -------------------------
-        if bias == "HOLD":
-            reason = "BIAS_HOLD"
-            skip_reasons["BIAS"][reason] = skip_reasons["BIAS"].get(reason, 0) + 1
+        if (
+            bias == "HOLD"
+            or not setup.get("setup_valid")
+            or not entry.get("entry_signal")
+        ):
             if log_skips:
-                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
+                logger.info(f"SKIP | {symbol} | ts={ts} | reason=signal invalid")
             continue
 
-        if not setup["setup_valid"]:
-            reason = setup.get("reason", "SETUP_INVALID")
-            skip_reasons["SETUP"][reason] = skip_reasons["SETUP"].get(reason, 0) + 1
+        entry_price = entry.get("entry_price")
+        stop_price = entry.get(
+            "stop_price", entry_price * 0.99 if bias == "BUY" else entry_price * 1.01
+        )
+        target_price = entry.get(
+            "target_price", entry_price * 1.02 if bias == "BUY" else entry_price * 0.98
+        )
+
+        # Compute size
+        size = risk_manager.compute_size(
+            symbol, bias, entry_price, stop_price, target_price
+        )
+        if size <= 0:
             if log_skips:
-                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
+                logger.info(f"SKIP | {symbol} | ts={ts} | reason=risk sizing zero")
             continue
 
-        if not entry["entry_signal"]:
-            reason = entry.get("reason", "ENTRY_INVALID")
-            skip_reasons["ENTRY"][reason] = skip_reasons["ENTRY"].get(reason, 0) + 1
+        # Open position
+        if bias == "BUY":
+            resp = broker.open_long(symbol, size, entry_price, stop_price, target_price)
+        else:
+            resp = broker.open_short(
+                symbol, size, entry_price, stop_price, target_price
+            )
+
+        if not resp.get("ok"):
             if log_skips:
-                logger.info(f"SKIP | {symbol} | ts={ts} | {reason}")
+                logger.info(f"SKIP | {symbol} | ts={ts} | reason={resp.get('reason')}")
             continue
 
-        # -------------------------
-        # Execute trade
-        # -------------------------
-        entry_price = entry["entry_price"]
-        exit_logs = simulate_trade_dynamic_atr(df_15m, i, entry_price, bias, logger=logger)
-        trade_exit_idx = i + len(exit_logs)
-        in_trade = True
+        # Track exit via ATR
+        for exit_data in simulate_trade_dynamic_atr(trader, df_15m, i, symbol, bias):
+            trades_log.append(exit_data)
 
-        for reason, pnl_usd, exit_ts, portion in exit_logs:
-            capital += pnl_usd
-            trades.append({
-                "symbol": symbol,
-                "entry_ts": ts,
-                "exit_ts": exit_ts,
-                "bias": bias,
-                "entry": entry_price,
-                "exit_reason": reason,
-                "pnl_usd": pnl_usd,
-                "capital": capital,
-                "portion": portion,
-            })
-            logger.info(f"TRADE | {symbol} | {bias} | Entry: {entry_price:.2f} | Exit: {reason} | PnL: {pnl_usd:.2f} | Capital: {capital:.2f} | Portion: {portion*100:.0f}%")
-
-    df_trades = pd.DataFrame(trades)
-    total_pnl = df_trades["pnl_usd"].sum() if not df_trades.empty else 0.0
-    winrate = (len(df_trades[df_trades["pnl_usd"]>0])/len(df_trades)*100) if len(df_trades) else 0.0
+    # -------------------------
+    # Summary
+    # -------------------------
+    total_pnl = sum(d["pnl"] for d in trades_log) if trades_log else 0.0
+    winrate = (
+        (len([d for d in trades_log if d["pnl"] > 0]) / len(trades_log) * 100)
+        if trades_log
+        else 0.0
+    )
 
     print(f"\n=== BACKTEST SUMMARY | {symbol} ===")
-    print(f"Trades: {len(df_trades)}")
+    print(f"Trades: {len(trades_log)}")
     print(f"Winrate: {winrate:.2f}%")
-    print(f"Final capital: {capital:.2f} USD")
+    print(f"Final capital: {broker.equity_usdt():.2f} USD")
     print(f"Total PnL: {total_pnl:.2f} USD")
-    return df_trades
+
+    return pd.DataFrame(trades_log)
+
 
 # -------------------------------
-# Main
+# Main entrypoint
 # -------------------------------
 if __name__ == "__main__":
     args = _build_arg_parser().parse_args()

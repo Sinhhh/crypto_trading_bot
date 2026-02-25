@@ -1,17 +1,24 @@
 """
 Entry point for Multi-Timeframe Intraday BTC & ETH Trading Signals
 Folder structure:
-- data/           -> OHLCV CSV files
-- indicators/     -> Structure, OB, FVG, Liquidity modules
-- strategies/     -> 4H/1H/15M logic + risk management
-- signals/        -> Signal generator
-- utils/          -> Data loading, candle utils, logging
+- data/                        -> OHLCV CSV files
+- src/core  -> Structure, OB, FVG, Liquidity, strategies
+- src/data  -> Data loading utilities
+- src/utils -> Candle utils, helpers
 """
+
+import os
+import sys
 
 import pandas as pd
 
-from utils.data_loader import load_csv_data
-from strategies.smc_signal import generate_signal
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
+SRC_PATH = os.path.join(PROJECT_ROOT, "src")
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
+
+from data.data_loader import load_csv_data
+from core.strategies.smc_signal import generate_signal
 
 
 # ===========================

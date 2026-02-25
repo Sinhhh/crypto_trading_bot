@@ -10,7 +10,7 @@ Intended use in the framework:
 
 import pandas as pd
 
-from indicators.order_blocks import is_displacement
+from core.indicators.order_blocks import is_displacement
 
 
 def detect_market_structure(df: pd.DataFrame) -> str:

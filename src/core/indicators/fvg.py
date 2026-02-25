@@ -12,7 +12,7 @@ Notes:
 
 import pandas as pd
 
-from indicators.order_blocks import is_directional_displacement
+from core.indicators.order_blocks import is_directional_displacement
 from utils.math import in_equilibrium
 
 

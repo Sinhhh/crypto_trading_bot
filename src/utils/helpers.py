@@ -109,6 +109,6 @@ def slice_lookback(df, current_ts, lookback):
 
 
 def calculate_atr(df, period=14):
-    tr = df['high'] - df['low']
+    tr = df["high"] - df["low"]
     atr = tr.rolling(period).mean()
     return atr.iloc[-1] if not atr.empty else 0.0

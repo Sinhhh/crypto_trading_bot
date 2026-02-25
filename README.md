@@ -72,7 +72,7 @@ If any stage fails, no trade is placed. This prevents overtrading and enforces s
     - `stop` (15M structure with optional ATR guard)
     - `target` (RR-based)
 
-The main signal output is produced by `generate_signal()` in [strategies/smc_signal.py](strategies/smc_signal.py). It returns:
+The main signal output is produced by `generate_signal()` in [src/core/strategies/smc_signal.py](src/core/strategies/smc_signal.py). It returns:
 
 - `bias_4h`, `setup_1h`, `entry_15m`
 - Convenience fields: `bias`, `setup_valid`, `entry_signal`
@@ -80,17 +80,15 @@ The main signal output is produced by `generate_signal()` in [strategies/smc_sig
 ## Repository Structure
 
 ```
-strategies/        → Multi-timeframe pipeline
-indicators/        → BOS, CHOCH, OB, FVG, liquidity logic
-broker/            → Risk manager + execution simulation
-exchange/          → ccxt exchange wrapper
-trader/            → Paper trader
-scripts/           → Data fetching helpers
-utils/             → Candle helpers and shared utilities
-backtest.py        → CSV backtest runner
-main.py            → One-shot signal snapshot
-logs/              → Runtime logs
-data/raw/          → BTC & ETH OHLCV data (15M/1H/4H)
+src/                     → All importable code
+  core/                  → Strategy + execution (broker/exchange/trader)
+  data/                  → ETL helpers, dataset loaders
+  utils/                 → Candle helpers and shared utilities
+scripts/                 → One-off CLI helpers
+backtest.py              → CSV backtest runner (entrypoint)
+main.py                  → One-shot signal snapshot (entrypoint)
+logs/                    → Runtime logs
+data/raw/                → BTC & ETH OHLCV data (15M/1H/4H)
 ```
 
 ## Installation
@@ -120,13 +118,13 @@ Paper trading fetches data via ccxt (default: Binance).
 Run:
 
 ```
-python3 -m backtest
+python3 backtest.py
 ```
 
 With options:
 
 ```
-python3 -m backtest --symbols BTC --log-skips
+python3 backtest.py --symbols BTC --log-skips
 ```
 
 Output:
@@ -151,16 +149,16 @@ Simulates:
 - Spot-like broker simulation (supports LONG and SHORT)
 - Console + per-run file logging
 
-Run:
+Run (module path with src layout):
 
 ```
-python3 -m trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30
+PYTHONPATH=src python3 -m core.trader.paper_trader --exchange binance --symbols BTC/USDT,ETH/USDT --poll 30
 ```
 
 Advanced example:
 
 ```
-python3 -m trader.paper_trader \
+PYTHONPATH=src python3 -m core.trader.paper_trader \
   --exchange binance \
   --symbols BTC/USDT \
   --poll 5 \
@@ -179,7 +177,7 @@ Logs:
 Run a one-shot signal evaluation with:
 
 ```
-python3 -m main
+python3 main.py
 ```
 
 By default it writes a CSV to `signals/output_signals.csv`. Create the `signals/` directory if you want that output.

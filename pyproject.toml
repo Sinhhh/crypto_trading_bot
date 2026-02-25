@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-trading-bot"
+version = "0.1.0"
+description = "Deterministic intraday BTC/ETH trading framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "ccxt>=4.0.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["core", "data", "utils", "core.*", "data.*", "utils.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "unit: unit tests",
+    "integration: integration tests",
+    "e2e: end-to-end tests",
+]
